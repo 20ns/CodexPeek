@@ -43,6 +43,20 @@ Once releases are published, download either:
 
 Move `CodexPeek.app` into `/Applications`, open it once, then enable `Launch at Login` from the menu if you want it to start automatically.
 
+### Unsigned app warning
+
+CodexPeek is currently distributed as an unsigned macOS app.
+
+That means macOS may show a warning the first time you open it, because the app is not yet signed and notarized with an Apple Developer account. The app still runs fine, but first launch may require one extra step.
+
+If macOS blocks the app:
+
+1. Move `CodexPeek.app` into `/Applications`
+2. Right-click the app and choose `Open`
+3. Click `Open` in the confirmation dialog
+
+If macOS still blocks it, go to `System Settings > Privacy & Security` and allow the app there, then launch it again.
+
 ### Build locally
 
 Requirements:
@@ -115,6 +129,12 @@ Project structure:
 - Better onboarding for first launch
 - Release screenshots
 - Optional update channel / auto-update strategy
+
+## Why macOS warns on first launch
+
+Unsigned apps trigger Gatekeeper warnings because Apple cannot verify the developer identity or notarization status. That warning is expected for the current public builds and does not mean CodexPeek is broken.
+
+The long-term plan is to ship signed and notarized releases. Until then, GitHub releases will include unsigned `.zip` and `.dmg` artifacts with the install steps above.
 
 ## Contributing
 

@@ -25,6 +25,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private let secondaryUsageItem = NSMenuItem()
     private let statusItemView = NSMenuItem()
     private let refreshItem = NSMenuItem(title: "Refresh Now", action: #selector(refreshNow), keyEquivalent: "r")
+    private let copyDebugInfoItem = NSMenuItem(title: "Copy Debug Info", action: #selector(copyDebugInfo), keyEquivalent: "")
     private let launchAtLoginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     private let logoutItem = NSMenuItem(title: "Log Out", action: #selector(logOut), keyEquivalent: "")
     private let openCodexItem = NSMenuItem(title: "Open Codex", action: #selector(openCodex), keyEquivalent: "")
@@ -88,6 +89,12 @@ final class AppController: NSObject, NSMenuDelegate {
         codexAppOpener.openCodex()
     }
 
+    @objc private func copyDebugInfo() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(debugSummary(), forType: .string)
+    }
+
     @objc private func logOut() {
         guard refreshTask == nil else {
             return
@@ -140,6 +147,7 @@ final class AppController: NSObject, NSMenuDelegate {
         statusItemView.view = statusView
 
         refreshItem.target = self
+        copyDebugInfoItem.target = self
         launchAtLoginItem.target = self
         logoutItem.target = self
         openCodexItem.target = self
@@ -152,6 +160,7 @@ final class AppController: NSObject, NSMenuDelegate {
         menu.addItem(statusItemView)
         menu.addItem(.separator())
         menu.addItem(refreshItem)
+        menu.addItem(copyDebugInfoItem)
         menu.addItem(launchAtLoginItem)
         menu.addItem(logoutItem)
         menu.addItem(openCodexItem)
@@ -252,7 +261,32 @@ final class AppController: NSObject, NSMenuDelegate {
         statusView.update(snapshot: snapshot, refreshState: refreshState)
         launchAtLoginItem.state = launchAtLoginController.isEnabled ? .on : .off
         refreshItem.isEnabled = refreshTask == nil
+        copyDebugInfoItem.isEnabled = true
         logoutItem.isEnabled = refreshTask == nil
+    }
+
+    private func debugSummary() -> String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let build = info?["CFBundleVersion"] as? String ?? "unknown"
+        let account = snapshot?.account.email ?? snapshot?.displayAccountName ?? "unknown"
+        let plan = snapshot?.account.planType.displayName ?? "Unknown"
+        let source = snapshot?.source.rawValue ?? "none"
+        let stale = snapshot?.isStale == true ? "yes" : "no"
+        let primary = snapshot?.primary.map { "\($0.usedPercent)%" } ?? "unavailable"
+        let secondary = snapshot?.secondary.map { "\($0.usedPercent)%" } ?? "unavailable"
+        let updatedAt = snapshot.map { UIFormatters.usageUpdatedString(from: $0.lastUpdatedAt) } ?? "never"
+
+        return [
+            "CodexPeek \(version) (\(build))",
+            "Account: \(account)",
+            "Plan: \(plan)",
+            "Source: \(source)",
+            "Stale: \(stale)",
+            "5h usage: \(primary)",
+            "Weekly usage: \(secondary)",
+            "Last updated: \(updatedAt)"
+        ].joined(separator: "\n")
     }
 }
 
