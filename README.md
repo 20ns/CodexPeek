@@ -6,7 +6,7 @@ The lightest Codex usage menu bar app for macOS.
 
 CodexPeek is a native `AppKit` menu bar utility that shows your Codex 5-hour and weekly usage without a browser shell, Electron runtime, or persistent background helper. It is built to stay out of the way: fast to launch, low on heat, and glanceable from the menu bar.
 
-![CodexPeek Screenshot](./main.png)
+![CodexPeek Screenshot](./Docs/Images/main.png)
 
 CodexPeek exists because a lot of utility apps in this space take the heavier route:
 - web runtimes
