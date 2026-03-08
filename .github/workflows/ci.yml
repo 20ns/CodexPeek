@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+
+jobs:
+  macos-build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Self-test
+        run: swift run CodexPeek --self-test
+
+      - name: Build app
+        run: ./Scripts/build_app.sh
+
+      - name: Build zip
+        run: ./Scripts/build_release.sh
+
+      - name: Build dmg
+        run: ./Scripts/build_dmg.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: codexpeek-artifacts
+          path: |
+            .build/CodexPeek.app
+            dist/CodexPeek.zip
+            dist/CodexPeek.dmg

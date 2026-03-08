@@ -1,0 +1,35 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1024" height="1024" fill="#E7E7E7"/>
+  <defs>
+    <linearGradient id="bubble" x1="228" y1="268" x2="836" y2="812" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#93ED64"/>
+      <stop offset="0.48" stop-color="#57CFE1"/>
+      <stop offset="1" stop-color="#8B43E8"/>
+    </linearGradient>
+    <linearGradient id="track" x1="283" y1="532" x2="743" y2="532" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A8E52E"/>
+      <stop offset="0.34" stop-color="#7DDE67"/>
+      <stop offset="0.64" stop-color="#45B3E0"/>
+      <stop offset="1" stop-color="#7C4DE9"/>
+    </linearGradient>
+    <filter id="knobShadow" x="555" y="403" width="193" height="193" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feOffset dy="9"/>
+      <feGaussianBlur stdDeviation="12"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.18 0"/>
+      <feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_1_1"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_1_1" result="shape"/>
+    </filter>
+  </defs>
+
+  <path d="M280 314C280 272.026 314.026 238 356 238H729C770.974 238 805 272.026 805 314V626C805 723.754 725.754 803 628 803H461.825L384.841 862.565C369.039 874.79 346 863.528 346 843.552V801.577C271.108 794.405 213 730.998 213 654V439C213 369.412 269.412 313 339 313H280V314Z" fill="url(#bubble)"/>
+
+  <rect x="251" y="421" width="518" height="116" rx="58" fill="#F7F7F7"/>
+  <rect x="285" y="446" width="457" height="66" rx="33" fill="url(#track)"/>
+  <rect x="285" y="446" width="52" height="66" rx="33" fill="#ACE52E"/>
+  <g filter="url(#knobShadow)">
+    <circle cx="650" cy="478" r="47" fill="#E9E9E9"/>
+  </g>
+
+  <path d="M764 266C764 325.96 716.248 374.72 656 374.72C714.968 374.72 762.56 422.824 762.56 481.92C762.56 422.824 810.152 374.72 869.12 374.72C810.152 374.72 762.56 326.616 762.56 267.52C762.56 267.016 762.557 266.517 762.551 266.022C762.545 266.519 762.542 267.018 762.542 267.52C762.542 326.613 714.957 374.72 656 374.72C716.248 374.72 764 325.96 764 266Z" fill="#F7F7F7"/>
+  <path d="M825.5 281C825.5 309.995 802.495 333.5 773.5 333.5C801.633 333.5 824.375 356.428 824.375 384.75C824.375 356.428 847.117 333.5 875.25 333.5C847.117 333.5 824.375 310.572 824.375 282.25C824.375 281.828 824.378 281.411 824.385 281C824.392 281.411 824.395 281.828 824.395 282.25C824.395 310.572 801.645 333.5 773.5 333.5C802.495 333.5 825.5 309.995 825.5 281Z" fill="#55CBE4"/>
+</svg>
