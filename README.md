@@ -16,6 +16,16 @@ CodexPeek exists because a lot of utility apps in this space take the heavier ro
 
 Those choices can be reasonable for feature-heavy apps, but they usually cost more RAM, more wakeups, and more background activity. CodexPeek is intentionally optimized for the opposite tradeoff: do less, stay native, and keep the footprint small.
 
+## Performance
+
+On my Mac, CodexPeek is materially lighter than CodexBar for the narrow job of showing Codex usage in the menu bar:
+
+- Idle memory in `top`: about `21 MB` for CodexPeek vs about `56 MB` for CodexBar
+- Rough cold launch to process start: about `47.6 ms` for CodexPeek vs about `113.4 ms` for CodexBar
+- App size on disk: `1.4 MB` for CodexPeek vs `68 MB` for CodexBar
+
+CodexBar supports a broader feature set, so this is not a blanket "better app" claim. It is a focused overhead comparison for this specific use case: lightweight Codex usage visibility on macOS.
+
 ## Why CodexPeek
 
 - Native macOS app, built with `Swift + AppKit`
