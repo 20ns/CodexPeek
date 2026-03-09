@@ -21,6 +21,9 @@ final class HeaderMenuItemView: NSView {
         let detail: String
         if let snapshot {
             var parts = [snapshot.account.planType.displayName]
+            if snapshot.isWeeklyExhausted {
+                parts.append("weekly limit reached")
+            }
             if snapshot.isStale {
                 parts.append("stale")
             }
@@ -74,13 +77,16 @@ final class UsageMenuItemView: NSView {
         nil
     }
 
-    func update(title: String, window: RateLimitWindowSnapshot?) {
+    func update(title: String, window: RateLimitWindowSnapshot?, isDimmed: Bool = false, overrideDetail: String? = nil) {
         titleField.stringValue = title
 
-        if let window {
+        if let overrideDetail {
+            progressIndicator.doubleValue = Double(window?.usedPercent ?? 0)
+            detailField.stringValue = overrideDetail
+        } else if let window {
             progressIndicator.doubleValue = Double(window.usedPercent)
             if let resetDate = window.resetsAt {
-                detailField.stringValue = "\(window.usedPercent)% used • resets \(UIFormatters.usageResetString(from: resetDate))"
+                detailField.stringValue = "\(window.usedPercent)% used • \(UIFormatters.usageResetCountdownString(from: resetDate))"
             } else {
                 detailField.stringValue = "\(window.usedPercent)% used • reset unavailable"
             }
@@ -88,6 +94,11 @@ final class UsageMenuItemView: NSView {
             progressIndicator.doubleValue = 0
             detailField.stringValue = "Unavailable"
         }
+
+        let alpha: CGFloat = isDimmed ? 0.45 : 1.0
+        titleField.alphaValue = alpha
+        progressIndicator.alphaValue = alpha
+        detailField.alphaValue = alpha
     }
 
     private func setup() {
@@ -148,7 +159,11 @@ final class StatusMenuItemView: NSView {
             if let snapshot {
                 let time = UIFormatters.usageUpdatedString(from: snapshot.lastUpdatedAt)
                 let source = snapshot.source == .live ? "live" : snapshot.source.rawValue
-                status = "Last updated \(time) • \(source)"
+                if snapshot.isWeeklyExhausted {
+                    status = "Weekly limit reached • last updated \(time) • \(source)"
+                } else {
+                    status = "Last updated \(time) • \(source)"
+                }
             } else {
                 status = "No Codex data yet"
             }

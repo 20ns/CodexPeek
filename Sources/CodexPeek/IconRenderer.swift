@@ -4,11 +4,12 @@ import AppKit
 final class StatusIconRenderer {
     private var cache: [IconCacheKey: NSImage] = [:]
 
-    func render(primaryPercent: Int?, secondaryPercent: Int?, refreshState: RefreshState) -> NSImage {
+    func render(primaryPercent: Int?, secondaryPercent: Int?, refreshState: RefreshState, isWeeklyExhausted: Bool) -> NSImage {
         let cacheKey = IconCacheKey(
             primaryPercent: primaryPercent,
             secondaryPercent: secondaryPercent,
-            isRefreshing: refreshState == .refreshing
+            isRefreshing: refreshState == .refreshing,
+            isWeeklyExhausted: isWeeklyExhausted
         )
 
         if let cached = cache[cacheKey] {
@@ -24,7 +25,8 @@ final class StatusIconRenderer {
         NSColor.clear.setFill()
         NSRect(origin: .zero, size: size).fill()
 
-        let level = UsageLevelResolver.resolve(for: primaryPercent)
+        let effectivePrimaryPercent = isWeeklyExhausted ? 100 : primaryPercent
+        let level: UsageLevel = isWeeklyExhausted ? .critical : UsageLevelResolver.resolve(for: effectivePrimaryPercent)
         let strokeColor = color(for: level)
         let primaryRect = NSRect(x: 2, y: 2, width: 12, height: 14)
         let path = NSBezierPath(roundedRect: primaryRect, xRadius: 3, yRadius: 3)
@@ -33,8 +35,8 @@ final class StatusIconRenderer {
         path.lineWidth = 1.5
         path.stroke()
 
-        if let primaryPercent {
-            let fillHeight = max(0, min(1, CGFloat(primaryPercent) / 100.0)) * (primaryRect.height - 3)
+        if let effectivePrimaryPercent {
+            let fillHeight = max(0, min(1, CGFloat(effectivePrimaryPercent) / 100.0)) * (primaryRect.height - 3)
             let fillRect = NSRect(
                 x: primaryRect.minX + 1.5,
                 y: primaryRect.minY + 1.5,
@@ -57,7 +59,8 @@ final class StatusIconRenderer {
         drawSecondaryBadge(
             percent: secondaryPercent,
             refreshState: refreshState,
-            level: UsageLevelResolver.resolve(for: secondaryPercent)
+            level: isWeeklyExhausted ? .critical : UsageLevelResolver.resolve(for: secondaryPercent),
+            isWeeklyExhausted: isWeeklyExhausted
         )
 
         if case .refreshing = refreshState {
@@ -69,7 +72,7 @@ final class StatusIconRenderer {
         return image
     }
 
-    private func drawSecondaryBadge(percent: Int?, refreshState: RefreshState, level: UsageLevel) {
+    private func drawSecondaryBadge(percent: Int?, refreshState: RefreshState, level: UsageLevel, isWeeklyExhausted: Bool) {
         let badgeRect = NSRect(x: 10.0, y: 9.0, width: 7, height: 7)
         let badge = NSBezierPath(roundedRect: badgeRect, xRadius: 2.2, yRadius: 2.2)
         let badgeColor = color(for: level).withAlphaComponent(refreshAlpha(for: refreshState))
@@ -80,8 +83,13 @@ final class StatusIconRenderer {
         badgeColor.setFill()
         badge.fill()
 
-        NSColor.white.withAlphaComponent(percent == nil ? 0.55 : 0.95).setStroke()
-        drawCodexGlyph(in: badgeRect)
+        if isWeeklyExhausted {
+            NSColor.white.withAlphaComponent(0.95).setStroke()
+            drawExhaustedGlyph(in: badgeRect)
+        } else {
+            NSColor.white.withAlphaComponent(percent == nil ? 0.55 : 0.95).setStroke()
+            drawCodexGlyph(in: badgeRect)
+        }
     }
 
     private func drawCodexGlyph(in rect: NSRect) {
@@ -115,6 +123,15 @@ final class StatusIconRenderer {
         bar.stroke()
     }
 
+    private func drawExhaustedGlyph(in rect: NSRect) {
+        let line = NSBezierPath()
+        line.move(to: CGPoint(x: rect.minX + 1.6, y: rect.midY))
+        line.line(to: CGPoint(x: rect.maxX - 1.6, y: rect.midY))
+        line.lineWidth = 1.2
+        line.lineCapStyle = .round
+        line.stroke()
+    }
+
     private func color(for level: UsageLevel) -> NSColor {
         switch level {
         case .normal:
@@ -142,4 +159,5 @@ private struct IconCacheKey: Hashable {
     let primaryPercent: Int?
     let secondaryPercent: Int?
     let isRefreshing: Bool
+    let isWeeklyExhausted: Bool
 }

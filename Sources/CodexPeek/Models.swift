@@ -47,6 +47,10 @@ struct RateLimitWindowSnapshot: Codable, Equatable {
     var usedPercent: Int
     var windowDurationMins: Int?
     var resetsAt: Date?
+
+    var isExhausted: Bool {
+        usedPercent >= 100
+    }
 }
 
 struct CodexUsageSnapshot: Codable, Equatable {
@@ -98,6 +102,10 @@ extension CodexPlanType {
 extension CodexUsageSnapshot {
     var displayAccountName: String {
         account.displayName
+    }
+
+    var isWeeklyExhausted: Bool {
+        secondary?.isExhausted == true
     }
 }
 

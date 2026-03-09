@@ -55,13 +55,6 @@ enum Formatters {
 
 @MainActor
 enum UIFormatters {
-    private static let usageReset: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter
-    }()
-
     private static let usageUpdated: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .none
@@ -69,8 +62,26 @@ enum UIFormatters {
         return formatter
     }()
 
-    static func usageResetString(from date: Date) -> String {
-        usageReset.string(from: date)
+    nonisolated static func usageResetCountdownString(from date: Date, now: Date = Date()) -> String {
+        let secondsRemaining = max(0, Int(date.timeIntervalSince(now)))
+        let minutesRemaining = max(0, secondsRemaining / 60)
+        let days = minutesRemaining / (24 * 60)
+        let hours = (minutesRemaining % (24 * 60)) / 60
+        let minutes = minutesRemaining % 60
+
+        if days > 0 {
+            return "resets in \(days) \(days == 1 ? "day" : "days") \(hours) \(hours == 1 ? "hr" : "hrs")"
+        }
+
+        if hours > 0 {
+            return "resets in \(hours) \(hours == 1 ? "hr" : "hrs") \(minutes) \(minutes == 1 ? "min" : "mins")"
+        }
+
+        if minutes > 0 {
+            return "resets in \(minutes) \(minutes == 1 ? "min" : "mins")"
+        }
+
+        return "resets soon"
     }
 
     static func usageUpdatedString(from date: Date) -> String {

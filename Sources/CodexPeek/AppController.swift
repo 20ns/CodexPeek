@@ -249,14 +249,21 @@ final class AppController: NSObject, NSMenuDelegate {
 
         let primaryPercent = snapshot?.primary?.usedPercent
         let secondaryPercent = snapshot?.secondary?.usedPercent
+        let isWeeklyExhausted = snapshot?.isWeeklyExhausted == true
         statusItem.button?.image = iconRenderer.render(
             primaryPercent: primaryPercent,
             secondaryPercent: secondaryPercent,
-            refreshState: refreshState
+            refreshState: refreshState,
+            isWeeklyExhausted: isWeeklyExhausted
         )
 
         headerView.update(snapshot: snapshot, refreshState: refreshState)
-        primaryUsageView.update(title: "5-hour window", window: snapshot?.primary)
+        primaryUsageView.update(
+            title: "5-hour window",
+            window: snapshot?.primary,
+            isDimmed: isWeeklyExhausted,
+            overrideDetail: isWeeklyExhausted ? "Weekly limit reached • 5-hour window resumes after the weekly reset" : nil
+        )
         secondaryUsageView.update(title: "Weekly window", window: snapshot?.secondary)
         statusView.update(snapshot: snapshot, refreshState: refreshState)
         launchAtLoginItem.state = launchAtLoginController.isEnabled ? .on : .off

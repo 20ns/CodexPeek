@@ -7,6 +7,8 @@ struct SelfTestRunner {
         try testSessionLogFallback()
         try await testRepositoryPrecedence()
         try testUsageLevelThresholds()
+        try testCountdownFormatting()
+        try testWeeklyExhaustionState()
         try await testMockClientIntegration()
         print("All self-tests passed.")
     }
@@ -101,6 +103,36 @@ struct SelfTestRunner {
         try expect(UsageLevelResolver.resolve(for: 69) == .normal, "69 threshold mismatch")
         try expect(UsageLevelResolver.resolve(for: 70) == .warning, "70 threshold mismatch")
         try expect(UsageLevelResolver.resolve(for: 90) == .critical, "90 threshold mismatch")
+    }
+
+    private func testCountdownFormatting() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        try expect(
+            UIFormatters.usageResetCountdownString(from: now.addingTimeInterval(4 * 3600 + 59 * 60), now: now) == "resets in 4 hrs 59 mins",
+            "hour countdown mismatch"
+        )
+        try expect(
+            UIFormatters.usageResetCountdownString(from: now.addingTimeInterval(6 * 24 * 3600 + 23 * 3600), now: now) == "resets in 6 days 23 hrs",
+            "day countdown mismatch"
+        )
+        try expect(
+            UIFormatters.usageResetCountdownString(from: now.addingTimeInterval(14 * 60), now: now) == "resets in 14 mins",
+            "minute countdown mismatch"
+        )
+    }
+
+    private func testWeeklyExhaustionState() throws {
+        let snapshot = CodexUsageSnapshot(
+            account: CodexAccountSnapshot(email: "nav@example.com", authMode: .chatgpt, planType: .plus),
+            primary: RateLimitWindowSnapshot(usedPercent: 12, windowDurationMins: 300, resetsAt: Date()),
+            secondary: RateLimitWindowSnapshot(usedPercent: 100, windowDurationMins: 10080, resetsAt: Date()),
+            source: .live,
+            lastUpdatedAt: Date(),
+            isStale: false
+        )
+
+        try expect(snapshot.isWeeklyExhausted, "weekly exhaustion should be detected")
+        try expect(snapshot.secondary?.isExhausted == true, "secondary window exhaustion mismatch")
     }
 
     private func testMockClientIntegration() async throws {
