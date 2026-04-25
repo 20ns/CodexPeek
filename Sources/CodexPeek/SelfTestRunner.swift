@@ -199,6 +199,15 @@ struct SelfTestRunner {
         try store.reconcileSystemAuth(among: [managedProfile])
         let refreshedDefaultSnapshot = try String(contentsOf: defaultSnapshotURL, encoding: .utf8)
         try expect(refreshedDefaultSnapshot == defaultRefreshedAuth, "refreshed default auth should persist to default snapshot")
+
+        _ = try store.prepareSystemAuth(for: managedProfile, among: [managedProfile])
+        try store.clearPersistedAuth(for: managedProfile, among: [managedProfile])
+        try expect(!FileManager.default.fileExists(atPath: managedAuthURL.path), "managed auth should be removed on clean logout")
+        let restoredDefaultAfterManagedClear = try String(contentsOf: systemAuthURL, encoding: .utf8)
+        try expect(restoredDefaultAfterManagedClear == defaultRefreshedAuth, "managed clean logout should restore default desktop auth")
+
+        try store.clearPersistedAuth(for: defaultProfile, among: [managedProfile])
+        try expect(!FileManager.default.fileExists(atPath: defaultSnapshotURL.path), "default auth snapshot should be removed on clean logout")
     }
 
     private func testWorkspaceStateSanitization() throws {

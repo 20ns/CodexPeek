@@ -123,6 +123,19 @@ final class CodexDesktopAuthStore: @unchecked Sendable {
         }
     }
 
+    func clearPersistedAuth(for profile: AccountProfile, among profiles: [AccountProfile]) throws {
+        switch profile.kind {
+        case .systemDefault:
+            try removeFileIfExists(at: defaultSnapshotURL)
+            try saveOwnerProfileID(AccountProfileStore.defaultProfileID)
+        case .managed:
+            if try currentOwnerProfileID(among: profiles) == profile.id {
+                _ = try restoreDefaultIfSystemAuthOwned(by: profile, among: profiles)
+            }
+            try removeFileIfExists(at: profile.authURL)
+        }
+    }
+
     private var systemAuthURL: URL {
         systemHomeURL.appendingPathComponent("auth.json")
     }
@@ -232,6 +245,12 @@ final class CodexDesktopAuthStore: @unchecked Sendable {
         )
         try sourceData.write(to: destinationURL, options: .atomic)
         return true
+    }
+
+    private func removeFileIfExists(at url: URL) throws {
+        if fileManager.fileExists(atPath: url.path) {
+            try fileManager.removeItem(at: url)
+        }
     }
 }
 

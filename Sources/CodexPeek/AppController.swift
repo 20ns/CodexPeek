@@ -231,18 +231,25 @@ final class AppController: NSObject, NSMenuDelegate {
                 self.snapshot = nil
                 self.refreshState = .idle
                 self.accountSnapshotsByProfileID.removeValue(forKey: activeProfile.id)
+                try self.codexDesktopAuthStore.clearPersistedAuth(
+                    for: activeProfile,
+                    among: self.accountState?.profiles ?? []
+                )
                 if activeProfile.kind == .managed {
-                    _ = try self.codexDesktopAuthStore.restoreDefaultIfSystemAuthOwned(
-                        by: activeProfile,
-                        among: self.accountState?.profiles ?? []
-                    )
+                    let state = try self.accountStore.deleteManagedProfile(id: activeProfile.id)
+                    self.pendingCreatedProfileIDs.remove(activeProfile.id)
+                    self.pendingLoginProfileID = self.pendingLoginProfileID == activeProfile.id ? nil : self.pendingLoginProfileID
+                    self.updateAccountState(state)
+                    if let profile = state.activeProfile() {
+                        try self.switchToProfile(profile, loadCachedSnapshot: true, refreshReason: nil)
+                    }
                 } else {
                     try self.codexDesktopAuthStore.clearOwnerIfNeeded(
                         for: activeProfile,
                         among: self.accountState?.profiles ?? []
                     )
+                    try self.syncAccountStateFromDisk()
                 }
-                try self.syncAccountStateFromDisk()
                 shouldRefreshAfterLogout = true
             } catch {
                 self.refreshState = .failed(error.localizedDescription)
@@ -575,26 +582,27 @@ final class AppController: NSObject, NSMenuDelegate {
 
     private func syncAccountStateFromDisk() throws {
         let state = try accountStore.loadState()
-        guard let profile = state.activeProfile() else {
+        guard state.activeProfile() != nil else {
             throw CodexUsageError.invalidResponse("missing active account profile")
         }
 
         try codexDesktopAuthStore.reconcileSystemAuth(among: state.profiles)
         updateAccountState(state)
+        try removeUnsignedManagedProfilesIfNeeded()
         try removeDuplicateManagedProfilesIfNeeded()
-
-        if activeProfile?.id != profile.id || activeProfile?.homePath != profile.homePath || repository == nil {
-            guard let currentState = accountState,
-                  let currentProfile = currentState.activeProfile() else {
-                throw CodexUsageError.invalidResponse("missing active account profile")
-            }
-            configureActiveProfile(currentProfile)
-        } else {
-            activeProfile = profile
+        guard let currentState = accountState,
+              let currentProfile = currentState.activeProfile() else {
+            throw CodexUsageError.invalidResponse("missing active account profile")
         }
 
-        if profile.kind == .systemDefault,
-           try codexDesktopAuthStore.shouldSyncDefaultSnapshotFromSystemAuth(among: state.profiles) {
+        if activeProfile?.id != currentProfile.id || activeProfile?.homePath != currentProfile.homePath || repository == nil {
+            configureActiveProfile(currentProfile)
+        } else {
+            activeProfile = currentProfile
+        }
+
+        if currentProfile.kind == .systemDefault,
+           try codexDesktopAuthStore.shouldSyncDefaultSnapshotFromSystemAuth(among: currentState.profiles) {
             try codexDesktopAuthStore.syncDefaultSnapshotFromSystemAuth()
         }
     }
@@ -637,6 +645,34 @@ final class AppController: NSObject, NSMenuDelegate {
             if pendingLoginProfileID == profile.id {
                 pendingLoginProfileID = nil
             }
+            updateAccountState(state)
+        }
+
+        if removedActiveProfile, let currentState = accountState, let profile = currentState.activeProfile() {
+            snapshot = nil
+            configureActiveProfile(profile)
+        }
+    }
+
+    private func removeUnsignedManagedProfilesIfNeeded() throws {
+        guard var state = accountState else {
+            return
+        }
+
+        var removedActiveProfile = false
+        for profile in state.profiles where profile.kind == .managed {
+            guard pendingLoginProfileID != profile.id,
+                  accountSnapshotsByProfileID[profile.id]?.isSignedIn != true else {
+                continue
+            }
+
+            if state.activeProfileID == profile.id {
+                removedActiveProfile = true
+            }
+
+            try codexDesktopAuthStore.clearPersistedAuth(for: profile, among: state.profiles)
+            state = try accountStore.deleteManagedProfile(id: profile.id)
+            pendingCreatedProfileIDs.remove(profile.id)
             updateAccountState(state)
         }
 
