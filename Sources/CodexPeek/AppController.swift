@@ -49,6 +49,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private var activeProfile: AccountProfile?
     private var accountSnapshotsByProfileID: [String: CodexAccountSnapshot] = [:]
     private var pendingLoginProfileID: String?
+    private var pendingCreatedProfileIDs = Set<String>()
     private var loginMonitorTask: Task<Void, Never>?
 
     init(accountStore: AccountProfileStore) {
@@ -180,6 +181,7 @@ final class AppController: NSObject, NSMenuDelegate {
                 throw CodexUsageError.invalidResponse("missing active account profile")
             }
 
+            pendingCreatedProfileIDs.insert(profile.id)
             try switchToProfile(profile, loadCachedSnapshot: false, refreshReason: nil)
             try startLogin(for: profile)
         } catch {
@@ -228,6 +230,7 @@ final class AppController: NSObject, NSMenuDelegate {
                 try await codexAppOpener.logout(environment: environment)
                 self.snapshot = nil
                 self.refreshState = .idle
+                self.accountSnapshotsByProfileID.removeValue(forKey: activeProfile.id)
                 if activeProfile.kind == .managed {
                     _ = try self.codexDesktopAuthStore.restoreDefaultIfSystemAuthOwned(
                         by: activeProfile,
@@ -271,6 +274,7 @@ final class AppController: NSObject, NSMenuDelegate {
                 among: accountState?.profiles ?? []
             )
             let state = try accountStore.deleteManagedProfile(id: activeProfile.id)
+            pendingCreatedProfileIDs.remove(activeProfile.id)
             pendingLoginProfileID = pendingLoginProfileID == activeProfile.id ? nil : pendingLoginProfileID
             updateAccountState(state)
             guard let profile = state.activeProfile() else {
@@ -549,36 +553,23 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func title(for profile: AccountProfile) -> String {
-        var parts = [profile.displayName]
-
         if let snapshot = accountSnapshotsByProfileID[profile.id], snapshot.isSignedIn {
-            parts.append(snapshot.displayName)
+            var parts: [String]
+            if profile.kind == .managed {
+                parts = [profile.name?.isEmpty == false ? profile.displayName : snapshot.displayName]
+            } else {
+                parts = [profile.displayName, snapshot.displayName]
+            }
             if snapshot.planType != .unknown {
                 parts.append(snapshot.planType.displayName)
             }
-            if isDuplicateSignIn(profileID: profile.id, snapshot: snapshot) {
-                parts.append("Duplicate sign-in")
-            }
+            return parts.joined(separator: " • ")
         } else if pendingLoginProfileID == profile.id {
-            parts.append("Finish sign-in in Terminal")
+            return "\(profile.kind == .managed ? "New Account" : profile.displayName) • Finish sign-in in Terminal"
+        } else if profile.kind == .managed {
+            return "Signed-out Account • Not signed in"
         } else {
-            parts.append("Not signed in")
-        }
-
-        return parts.joined(separator: " • ")
-    }
-
-    private func isDuplicateSignIn(profileID: String, snapshot: CodexAccountSnapshot) -> Bool {
-        accountSnapshotsByProfileID.contains { entry in
-            let (otherProfileID, otherSnapshot) = entry
-            guard otherProfileID != profileID else {
-                return false
-            }
-
-            return otherSnapshot.isSignedIn
-                && otherSnapshot.authMode == snapshot.authMode
-                && otherSnapshot.email == snapshot.email
-                && otherSnapshot.planType == snapshot.planType
+            return "\(profile.displayName) • Not signed in"
         }
     }
 
@@ -590,9 +581,14 @@ final class AppController: NSObject, NSMenuDelegate {
 
         try codexDesktopAuthStore.reconcileSystemAuth(among: state.profiles)
         updateAccountState(state)
+        try removeDuplicateManagedProfilesIfNeeded()
 
         if activeProfile?.id != profile.id || activeProfile?.homePath != profile.homePath || repository == nil {
-            configureActiveProfile(profile)
+            guard let currentState = accountState,
+                  let currentProfile = currentState.activeProfile() else {
+                throw CodexUsageError.invalidResponse("missing active account profile")
+            }
+            configureActiveProfile(currentProfile)
         } else {
             activeProfile = profile
         }
@@ -614,6 +610,53 @@ final class AppController: NSObject, NSMenuDelegate {
                 }
                 return (profile.id, snapshot)
             }
+        )
+    }
+
+    private func removeDuplicateManagedProfilesIfNeeded() throws {
+        guard var state = accountState else {
+            return
+        }
+
+        var removedActiveProfile = false
+        for profile in state.profiles where profile.kind == .managed {
+            guard let snapshot = accountSnapshotsByProfileID[profile.id],
+                  snapshot.isSignedIn,
+                  let keeper = duplicateKeeper(for: profile, snapshot: snapshot, in: state) else {
+                continue
+            }
+
+            if state.activeProfileID == profile.id {
+                _ = try accountStore.setActiveProfileID(keeper.id)
+                removedActiveProfile = true
+            }
+
+            _ = try codexDesktopAuthStore.restoreDefaultIfSystemAuthOwned(by: profile, among: state.profiles)
+            state = try accountStore.deleteManagedProfile(id: profile.id)
+            pendingCreatedProfileIDs.remove(profile.id)
+            if pendingLoginProfileID == profile.id {
+                pendingLoginProfileID = nil
+            }
+            updateAccountState(state)
+        }
+
+        if removedActiveProfile, let currentState = accountState, let profile = currentState.activeProfile() {
+            snapshot = nil
+            configureActiveProfile(profile)
+        }
+    }
+
+    private func duplicateKeeper(
+        for profile: AccountProfile,
+        snapshot: CodexAccountSnapshot,
+        in state: AccountProfilesState
+    ) -> AccountProfile? {
+        DuplicateProfileRecovery.keeper(
+            for: profile,
+            snapshot: snapshot,
+            in: state,
+            snapshotsByProfileID: accountSnapshotsByProfileID,
+            pendingCreatedProfileIDs: pendingCreatedProfileIDs
         )
     }
 
@@ -704,9 +747,29 @@ final class AppController: NSObject, NSMenuDelegate {
                     try self.syncAccountStateFromDisk()
                     if let snapshot = self.accountSnapshotsByProfileID[profile.id], snapshot.isSignedIn {
                         self.pendingLoginProfileID = nil
-                        try self.applySignedInProfileName(profileID: profile.id, snapshot: snapshot)
-                        self.render()
-                        if self.activeProfile?.id == profile.id {
+                        let duplicate = self.accountState.flatMap {
+                            self.duplicateKeeper(for: profile, snapshot: snapshot, in: $0)
+                        }
+
+                        if let duplicate {
+                            _ = try self.codexDesktopAuthStore.restoreDefaultIfSystemAuthOwned(
+                                by: profile,
+                                among: self.accountState?.profiles ?? []
+                            )
+                            _ = try self.accountStore.deleteManagedProfile(id: profile.id)
+                            self.pendingCreatedProfileIDs.remove(profile.id)
+                            _ = try self.accountStore.setActiveProfileID(duplicate.id)
+                            try self.syncAccountStateFromDisk()
+                            if let activeProfile = self.accountState?.activeProfile() {
+                                try self.switchToProfile(activeProfile, loadCachedSnapshot: true, refreshReason: "duplicate-login")
+                            }
+                        } else {
+                            self.pendingCreatedProfileIDs.remove(profile.id)
+                            try self.applySignedInProfileName(profileID: profile.id, snapshot: snapshot)
+                            self.render()
+                        }
+
+                        if self.activeProfile?.id == profile.id || duplicate != nil {
                             self.triggerRefresh(reason: "login", force: true)
                         }
                         return

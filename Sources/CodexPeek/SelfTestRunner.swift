@@ -119,6 +119,15 @@ struct SelfTestRunner {
             candidates.map(\.id) == [defaultProfile.id, duplicateManagedProfile.id],
             "duplicate recovery should prioritize the default profile"
         )
+
+        let keeper = DuplicateProfileRecovery.keeper(
+            for: activeManagedProfile,
+            snapshot: snapshotsByProfileID[activeManagedProfile.id]!,
+            in: state,
+            snapshotsByProfileID: snapshotsByProfileID,
+            pendingCreatedProfileIDs: [activeManagedProfile.id]
+        )
+        try expect(keeper?.id == defaultProfile.id, "duplicate keeper should reuse the existing default profile")
     }
 
     private func testDesktopAuthStore() throws {

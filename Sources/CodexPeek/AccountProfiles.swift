@@ -51,6 +51,35 @@ struct AccountProfilesState: Codable, Equatable {
 }
 
 enum DuplicateProfileRecovery {
+    static func keeper(
+        for profile: AccountProfile,
+        snapshot: CodexAccountSnapshot,
+        in state: AccountProfilesState,
+        snapshotsByProfileID: [String: CodexAccountSnapshot],
+        pendingCreatedProfileIDs: Set<String> = []
+    ) -> AccountProfile? {
+        state.profiles
+            .filter { $0.id != profile.id }
+            .filter { otherProfile in
+                guard let otherSnapshot = snapshotsByProfileID[otherProfile.id] else {
+                    return false
+                }
+                return otherSnapshot.matchesIdentity(of: snapshot)
+            }
+            .sorted { lhs, rhs in
+                if lhs.kind != rhs.kind {
+                    return lhs.kind == .systemDefault
+                }
+                let lhsWasNew = pendingCreatedProfileIDs.contains(lhs.id)
+                let rhsWasNew = pendingCreatedProfileIDs.contains(rhs.id)
+                if lhsWasNew != rhsWasNew {
+                    return !lhsWasNew
+                }
+                return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+            }
+            .first
+    }
+
     static func candidateProfiles(
         from state: AccountProfilesState,
         activeProfile: AccountProfile,
