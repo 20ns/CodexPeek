@@ -35,9 +35,14 @@ final class SnapshotCacheStore: UsageSnapshotStoring, @unchecked Sendable {
     }
 
     static func defaultCacheURL() -> URL {
+        defaultCacheURL(profileID: "default")
+    }
+
+    static func defaultCacheURL(profileID: String) -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base
             .appendingPathComponent("CodexPeek", isDirectory: true)
-            .appendingPathComponent("snapshot.json")
+            .appendingPathComponent("Snapshots", isDirectory: true)
+            .appendingPathComponent("\(profileID).json")
     }
 }

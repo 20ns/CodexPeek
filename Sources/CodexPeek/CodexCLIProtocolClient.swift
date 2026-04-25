@@ -127,11 +127,13 @@ final class CodexCLIProtocolClient: CodexUsageLiveSource, @unchecked Sendable {
         }
 
         let rateLimitSnapshot = AppServerRateLimitSelector.selectCodexSnapshot(from: rateLimitsResult)
+        let sparkSnapshot = AppServerRateLimitSelector.selectSparkSnapshot(from: rateLimitsResult)
 
         return CodexUsageSnapshot(
             account: mapAccount(accountResult.account),
             primary: mapWindow(rateLimitSnapshot.primary),
             secondary: mapWindow(rateLimitSnapshot.secondary),
+            spark: sparkSnapshot.map(mapSparkSnapshot),
             source: .live,
             lastUpdatedAt: Date(),
             isStale: false
@@ -189,6 +191,15 @@ final class CodexCLIProtocolClient: CodexUsageLiveSource, @unchecked Sendable {
             usedPercent: window.usedPercent,
             windowDurationMins: window.windowDurationMins,
             resetsAt: window.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        )
+    }
+
+    private func mapSparkSnapshot(_ snapshot: AppServerRateLimitSnapshot) -> SupplementalRateLimitSnapshot {
+        SupplementalRateLimitSnapshot(
+            limitID: snapshot.limitId ?? "spark",
+            title: "5.3 Spark",
+            primary: mapWindow(snapshot.primary),
+            secondary: mapWindow(snapshot.secondary)
         )
     }
 }

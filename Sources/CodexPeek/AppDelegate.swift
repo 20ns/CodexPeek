@@ -10,14 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let repository = UsageRepository(
-            liveSource: CodexCLIProtocolClient(),
-            sessionLogSource: CodexSessionLogUsageSource(),
-            cacheStore: SnapshotCacheStore(),
-            accountInfoSource: AuthJSONAccountInfoSource()
-        )
-
-        let controller = AppController(repository: repository)
+        let controller = AppController(accountStore: AccountProfileStore())
         self.controller = controller
         controller.start()
     }

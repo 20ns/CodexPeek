@@ -2,20 +2,17 @@ import Foundation
 import Darwin
 
 final class AuthFileWatcher {
-    private let watchedURL: URL
+    private var watchedURL: URL?
     private var source: DispatchSourceFileSystemObject?
     private var fileDescriptor: Int32 = -1
-
-    init(watchedURL: URL = URL(fileURLWithPath: NSString(string: "~/.codex").expandingTildeInPath)) {
-        self.watchedURL = watchedURL
-    }
 
     deinit {
         stop()
     }
 
-    func start(onChange: @escaping @Sendable () -> Void) {
+    func start(watching watchedURL: URL, onChange: @escaping @Sendable () -> Void) {
         stop()
+        self.watchedURL = watchedURL
 
         fileDescriptor = open(watchedURL.path, O_EVTONLY)
         guard fileDescriptor >= 0 else {
@@ -41,5 +38,6 @@ final class AuthFileWatcher {
         source?.cancel()
         source = nil
         fileDescriptor = -1
+        watchedURL = nil
     }
 }

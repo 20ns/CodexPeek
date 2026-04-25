@@ -35,11 +35,13 @@ struct CodexAccountSnapshot: Codable, Equatable {
     var email: String?
     var authMode: CodexAuthMode
     var planType: CodexPlanType
+    var renewsAt: Date? = nil
 
     static let empty = CodexAccountSnapshot(
         email: nil,
         authMode: .unknown,
-        planType: .unknown
+        planType: .unknown,
+        renewsAt: nil
     )
 }
 
@@ -53,10 +55,22 @@ struct RateLimitWindowSnapshot: Codable, Equatable {
     }
 }
 
+struct SupplementalRateLimitSnapshot: Codable, Equatable {
+    var limitID: String
+    var title: String
+    var primary: RateLimitWindowSnapshot?
+    var secondary: RateLimitWindowSnapshot?
+
+    var isWeeklyExhausted: Bool {
+        secondary?.isExhausted == true
+    }
+}
+
 struct CodexUsageSnapshot: Codable, Equatable {
     var account: CodexAccountSnapshot
     var primary: RateLimitWindowSnapshot?
     var secondary: RateLimitWindowSnapshot?
+    var spark: SupplementalRateLimitSnapshot? = nil
     var source: SnapshotSource
     var lastUpdatedAt: Date
     var isStale: Bool
@@ -110,6 +124,18 @@ extension CodexUsageSnapshot {
 }
 
 extension CodexAccountSnapshot {
+    var isSignedIn: Bool {
+        authMode != .unknown || email != nil
+    }
+
+    func matchesIdentity(of other: CodexAccountSnapshot) -> Bool {
+        isSignedIn
+            && other.isSignedIn
+            && authMode == other.authMode
+            && email == other.email
+            && planType == other.planType
+    }
+
     var displayName: String {
         if let email, !email.isEmpty {
             return email

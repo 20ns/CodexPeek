@@ -62,6 +62,12 @@ enum UIFormatters {
         return formatter
     }()
 
+    private static let accountRenewal: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("MMM d")
+        return formatter
+    }()
+
     nonisolated static func usageResetCountdownString(from date: Date, now: Date = Date()) -> String {
         let secondsRemaining = max(0, Int(date.timeIntervalSince(now)))
         let minutesRemaining = max(0, secondsRemaining / 60)
@@ -86,5 +92,9 @@ enum UIFormatters {
 
     static func usageUpdatedString(from date: Date) -> String {
         usageUpdated.string(from: date)
+    }
+
+    static func accountRenewalString(from date: Date) -> String {
+        accountRenewal.string(from: date)
     }
 }

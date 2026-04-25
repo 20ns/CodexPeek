@@ -29,15 +29,17 @@ final class AuthJSONAccountInfoSource: AccountInfoSource, @unchecked Sendable {
 
         let email = tokenPayload?.email
         let planType = CodexPlanType(rawValue: tokenPayload?.openAI?.chatGPTPlanType ?? "") ?? .unknown
+        let renewsAt = tokenPayload?.openAI?.chatGPTSubscriptionActiveUntil.flatMap(Formatters.parseISO8601)
 
-        if email == nil, authMode == .unknown, planType == .unknown {
+        if email == nil, authMode == .unknown, planType == .unknown, renewsAt == nil {
             return nil
         }
 
         return CodexAccountSnapshot(
             email: email,
             authMode: authMode,
-            planType: planType
+            planType: planType,
+            renewsAt: renewsAt
         )
     }
 
@@ -91,8 +93,10 @@ private struct AuthJWTPayload: Decodable {
 
 private struct OpenAIAuthPayload: Decodable {
     let chatGPTPlanType: String?
+    let chatGPTSubscriptionActiveUntil: String?
 
     private enum CodingKeys: String, CodingKey {
         case chatGPTPlanType = "chatgpt_plan_type"
+        case chatGPTSubscriptionActiveUntil = "chatgpt_subscription_active_until"
     }
 }

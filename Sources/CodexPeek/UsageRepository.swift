@@ -68,6 +68,10 @@ actor UsageRepository {
             snapshot.account.planType = fallback?.account.planType ?? authFallback?.planType ?? .unknown
         }
 
+        if snapshot.account.renewsAt == nil {
+            snapshot.account.renewsAt = fallback?.account.renewsAt ?? authFallback?.renewsAt
+        }
+
         return snapshot
     }
 }
