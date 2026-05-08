@@ -96,7 +96,7 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     }
 
     private func sessionUsage(from fileURL: URL) throws -> SessionUsage? {
-        let headData = try readHead(of: fileURL, maxBytes: 40_000)
+        let headData = try readHead(of: fileURL, maxBytes: 2_000_000)
         let tailData = try readTail(of: fileURL, maxBytes: 160_000)
         guard let headText = String(data: headData, encoding: .utf8),
               let tailText = String(data: tailData, encoding: .utf8) else {

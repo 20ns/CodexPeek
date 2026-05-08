@@ -350,7 +350,6 @@ final class AppController: NSObject, NSMenuDelegate {
         menu.addItem(launchAtLoginItem)
         menu.addItem(logoutItem)
         menu.addItem(openCodexItem)
-        menu.addItem(removeAccountItem)
         menu.addItem(.separator())
         menu.addItem(quitItem)
     }
@@ -528,13 +527,8 @@ final class AppController: NSObject, NSMenuDelegate {
         logoutItem.isEnabled = refreshTask == nil && activeAccountSnapshot?.isSignedIn == true
         openCodexItem.title = "Open Codex with Selected Account"
         openCodexItem.isEnabled = activeAccountSnapshot?.isSignedIn == true
-        if activeProfile?.kind == .managed {
-            removeAccountItem.title = "Remove Current Account…"
-            removeAccountItem.isEnabled = refreshTask == nil
-        } else {
-            removeAccountItem.title = "Default Account Cannot Be Removed"
-            removeAccountItem.isEnabled = false
-        }
+        removeAccountItem.title = "Remove Current Account…"
+        removeAccountItem.isEnabled = refreshTask == nil && activeProfile?.kind == .managed
     }
 
     private func renderAccountsMenu() {
@@ -576,6 +570,11 @@ final class AppController: NSObject, NSMenuDelegate {
         let appHintItem = NSMenuItem(title: "Open Codex applies the selected account to Codex.app.", action: nil, keyEquivalent: "")
         appHintItem.isEnabled = false
         accountsMenu.addItem(appHintItem)
+
+        if activeProfile?.kind == .managed {
+            accountsMenu.addItem(.separator())
+            accountsMenu.addItem(removeAccountItem)
+        }
     }
 
     private func title(for profile: AccountProfile) -> String {

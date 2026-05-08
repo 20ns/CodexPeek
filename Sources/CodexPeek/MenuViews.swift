@@ -78,6 +78,7 @@ final class HeaderMenuItemView: NSView {
 
         addSubview(row)
         NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 320),
             row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             row.topAnchor.constraint(equalTo: topAnchor, constant: 10),
@@ -169,6 +170,7 @@ final class UsageMenuItemView: NSView {
 
         addSubview(stack)
         NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 320),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
@@ -263,6 +265,7 @@ final class CompactSupplementalUsageMenuItemView: NSView {
 
         addSubview(stack)
         NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 320),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 9),
@@ -331,6 +334,8 @@ final class TokenCostMenuItemView: NSView {
         modelField.font = .systemFont(ofSize: 11)
         modelField.textColor = .secondaryLabelColor
         modelField.lineBreakMode = .byTruncatingTail
+        modelField.maximumNumberOfLines = 1
+        modelField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let stack = NSStackView(views: [titleField, detailField, modelField])
         stack.orientation = .vertical
@@ -340,6 +345,7 @@ final class TokenCostMenuItemView: NSView {
 
         addSubview(stack)
         NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 320),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
@@ -361,6 +367,7 @@ final class StatusMenuItemView: NSView {
         addSubview(labelField)
 
         NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 320),
             labelField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             labelField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             labelField.centerYAnchor.constraint(equalTo: centerYAnchor)
