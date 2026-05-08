@@ -96,23 +96,21 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     }
 
     private func sessionUsage(from fileURL: URL) throws -> SessionUsage? {
-        let data = try readTail(of: fileURL, maxBytes: 120_000)
-        guard let text = String(data: data, encoding: .utf8) else {
+        let headData = try readHead(of: fileURL, maxBytes: 40_000)
+        let tailData = try readTail(of: fileURL, maxBytes: 160_000)
+        guard let headText = String(data: headData, encoding: .utf8),
+              let tailText = String(data: tailData, encoding: .utf8) else {
             return nil
         }
 
         let decoder = JSONDecoder()
-        var model: String?
+        let model = modelName(from: headText, decoder: decoder)
         var latestUsage: TokenUsagePayload?
         var latestTimestamp: Date?
 
-        for line in text.split(whereSeparator: \.isNewline) {
+        for line in tailText.split(whereSeparator: \.isNewline) {
             guard let entry = try? decoder.decode(TokenUsageLogEntry.self, from: Data(line.utf8)) else {
                 continue
-            }
-
-            if entry.type == "turn_context", let contextModel = entry.payload?.model, !contextModel.isEmpty {
-                model = contextModel
             }
 
             guard entry.type == "event_msg",
@@ -135,6 +133,28 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
             usage: latestUsage,
             updatedAt: latestTimestamp ?? modifiedAt ?? Date.distantPast
         )
+    }
+
+    private func modelName(from text: String, decoder: JSONDecoder) -> String? {
+        for line in text.split(whereSeparator: \.isNewline) {
+            guard let entry = try? decoder.decode(TokenUsageLogEntry.self, from: Data(line.utf8)),
+                  entry.type == "turn_context",
+                  let model = entry.payload?.model,
+                  !model.isEmpty else {
+                continue
+            }
+
+            return model
+        }
+
+        return nil
+    }
+
+    private func readHead(of fileURL: URL, maxBytes: Int) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? handle.close() }
+
+        return try handle.read(upToCount: maxBytes) ?? Data()
     }
 
     private func readTail(of fileURL: URL, maxBytes: Int) throws -> Data {
