@@ -28,7 +28,7 @@ final class HeaderMenuItemView: NSView {
                 parts.append("weekly limit reached")
             }
             if snapshot.isStale {
-                parts.append("stale")
+                parts.append("estimate")
             }
             if case .failed = refreshState {
                 parts.append("refresh failed")
@@ -271,7 +271,7 @@ final class StatusMenuItemView: NSView {
                 status = accountStatus
             } else if let snapshot {
                 let time = UIFormatters.usageUpdatedString(from: snapshot.lastUpdatedAt)
-                let source = snapshot.source == .live ? "live" : snapshot.source.rawValue
+                let source = snapshot.source.displayName
                 if snapshot.isWeeklyExhausted {
                     status = "Weekly limit reached • last updated \(time) • \(source)"
                 } else {
@@ -285,7 +285,7 @@ final class StatusMenuItemView: NSView {
         case .failed(let message):
             if let snapshot {
                 let time = UIFormatters.usageUpdatedString(from: snapshot.lastUpdatedAt)
-                status = "\(message) • showing \(snapshot.source.rawValue) from \(time)"
+                status = "\(message) • showing \(snapshot.source.displayName.lowercased()) from \(time)"
             } else {
                 status = message
             }

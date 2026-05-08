@@ -147,6 +147,13 @@ final class AppController: NSObject, NSMenuDelegate {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(debugSummary(), forType: .string)
+        copyDebugInfoItem.title = "Copied Debug Info"
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            await MainActor.run {
+                self?.copyDebugInfoItem.title = "Copy Debug Info"
+            }
+        }
     }
 
     @objc private func selectAccountProfile(_ sender: NSMenuItem) {
@@ -510,12 +517,19 @@ final class AppController: NSObject, NSMenuDelegate {
         renderAccountsMenu()
 
         launchAtLoginItem.state = launchAtLoginController.isEnabled ? .on : .off
+        refreshItem.title = refreshTask == nil ? "Refresh Now" : "Refreshing…"
         refreshItem.isEnabled = refreshTask == nil
         copyDebugInfoItem.isEnabled = true
         logoutItem.isEnabled = refreshTask == nil && activeAccountSnapshot?.isSignedIn == true
         openCodexItem.title = "Open Codex with Selected Account"
         openCodexItem.isEnabled = activeAccountSnapshot?.isSignedIn == true
-        removeAccountItem.isEnabled = refreshTask == nil && activeProfile?.kind == .managed
+        if activeProfile?.kind == .managed {
+            removeAccountItem.title = "Remove Current Account…"
+            removeAccountItem.isEnabled = refreshTask == nil
+        } else {
+            removeAccountItem.title = "Default Account Cannot Be Removed"
+            removeAccountItem.isEnabled = false
+        }
     }
 
     private func renderAccountsMenu() {
@@ -870,7 +884,7 @@ final class AppController: NSObject, NSMenuDelegate {
         let account = snapshot?.account.email ?? snapshot?.displayAccountName ?? activeAccountSnapshot?.displayName ?? "unknown"
         let plan = snapshot?.account.planType.displayName ?? activeAccountSnapshot?.planType.displayName ?? "Unknown"
         let renewsAt = snapshot?.account.renewsAt ?? activeAccountSnapshot?.renewsAt
-        let source = snapshot?.source.rawValue ?? "none"
+        let source = snapshot?.source.displayName ?? "none"
         let stale = snapshot?.isStale == true ? "yes" : "no"
         let primary = snapshot?.primary.map { "\($0.usedPercent)%" } ?? "unavailable"
         let secondary = snapshot?.secondary.map { "\($0.usedPercent)%" } ?? "unavailable"

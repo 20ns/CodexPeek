@@ -12,6 +12,7 @@ enum CodexPlanType: String, Codable, Equatable {
     case go
     case plus
     case pro
+    case prolite
     case team
     case business
     case enterprise
@@ -109,7 +110,24 @@ enum UsageLevelResolver {
 
 extension CodexPlanType {
     var displayName: String {
-        rawValue.capitalized
+        if self == .prolite {
+            return "Pro"
+        }
+
+        return rawValue.capitalized
+    }
+}
+
+extension SnapshotSource {
+    var displayName: String {
+        switch self {
+        case .live:
+            return "Live data"
+        case .sessionLog:
+            return "Session log estimate"
+        case .cache:
+            return "Cached estimate"
+        }
     }
 }
 
