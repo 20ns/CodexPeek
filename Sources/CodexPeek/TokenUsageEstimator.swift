@@ -1,58 +1,59 @@
 import Foundation
 
 protocol TokenUsageSource: Sendable {
-    func weeklySummary() throws -> TokenUsageSummary
+    func usageReport() throws -> TokenUsageReport
 }
 
 final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     private let sessionsRootURL: URL
     private let fileManager: FileManager
     private let pricingCatalog: TokenPricingCatalog
-    private let lookback: TimeInterval
 
     init(
         sessionsRootURL: URL = URL(fileURLWithPath: NSString(string: "~/.codex/sessions").expandingTildeInPath),
         fileManager: FileManager = .default,
-        pricingCatalog: TokenPricingCatalog = .standard,
-        lookback: TimeInterval = 7 * 24 * 60 * 60
+        pricingCatalog: TokenPricingCatalog = .standard
     ) {
         self.sessionsRootURL = sessionsRootURL
         self.fileManager = fileManager
         self.pricingCatalog = pricingCatalog
-        self.lookback = lookback
     }
 
-    func weeklySummary() throws -> TokenUsageSummary {
-        let cutoff = Date().addingTimeInterval(-lookback)
-        let files = try sessionLogFiles(modifiedSince: cutoff)
-        var summary = TokenUsageSummary.empty
-        var totalsByModel: [String: Int] = [:]
+    func usageReport() throws -> TokenUsageReport {
+        let now = Date()
+        let weekCutoff = now.addingTimeInterval(-7 * 24 * 60 * 60)
+        let monthCutoff = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: now)) ?? weekCutoff
+        let files = try sessionLogFiles()
+        var report = TokenUsageReport.empty
+        var weeklyTotalsByModel: [String: Int] = [:]
+        var monthlyTotalsByModel: [String: Int] = [:]
+        var allTimeTotalsByModel: [String: Int] = [:]
 
         for fileURL in files {
-            guard let session = try sessionUsage(from: fileURL) else {
+            guard let session = try autoreleasepool(invoking: {
+                try sessionUsage(from: fileURL)
+            }) else {
                 continue
             }
 
-            summary.inputTokens += session.usage.inputTokens
-            summary.cachedInputTokens += session.usage.cachedInputTokens
-            summary.outputTokens += session.usage.outputTokens
-            summary.reasoningOutputTokens += session.usage.reasoningOutputTokens
-            summary.totalTokens += session.usage.totalTokens
-            summary.sessionCount += 1
+            add(session, to: &report.allTime, totalsByModel: &allTimeTotalsByModel)
 
-            if let model = session.model,
-               let cost = pricingCatalog.estimateCost(for: model, usage: session.usage) {
-                summary.estimatedCostUSD += cost
-                summary.pricedSessionCount += 1
-                totalsByModel[pricingCatalog.displayModelName(for: model), default: 0] += session.usage.totalTokens
+            if session.updatedAt >= monthCutoff {
+                add(session, to: &report.month, totalsByModel: &monthlyTotalsByModel)
+            }
+
+            if session.updatedAt >= weekCutoff {
+                add(session, to: &report.week, totalsByModel: &weeklyTotalsByModel)
             }
         }
 
-        summary.topModel = totalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
-        return summary
+        report.week.topModel = weeklyTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
+        report.month.topModel = monthlyTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
+        report.allTime.topModel = allTimeTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
+        return report
     }
 
-    private func sessionLogFiles(modifiedSince cutoff: Date) throws -> [URL] {
+    private func sessionLogFiles() throws -> [URL] {
         guard let enumerator = fileManager.enumerator(
             at: sessionsRootURL,
             includingPropertiesForKeys: [.contentModificationDateKey],
@@ -63,18 +64,39 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
 
         var files: [URL] = []
         for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" {
-            let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey])
-            guard let modifiedAt = values?.contentModificationDate, modifiedAt >= cutoff else {
-                continue
-            }
             files.append(fileURL)
         }
 
         return files
     }
 
+    private func add(
+        _ session: SessionUsage,
+        to summary: inout TokenUsageSummary,
+        totalsByModel: inout [String: Int]
+    ) {
+        summary.inputTokens += session.usage.inputTokens
+        summary.cachedInputTokens += session.usage.cachedInputTokens
+        summary.outputTokens += session.usage.outputTokens
+        summary.reasoningOutputTokens += session.usage.reasoningOutputTokens
+        summary.totalTokens += session.usage.totalTokens
+        summary.sessionCount += 1
+
+        guard let model = session.model,
+              let cost = pricingCatalog.estimateCost(for: model, usage: session.usage) else {
+            return
+        }
+
+        summary.estimatedCostUSD += cost.total
+        summary.uncachedInputCostUSD += cost.uncachedInput
+        summary.cachedInputCostUSD += cost.cachedInput
+        summary.outputCostUSD += cost.output
+        summary.pricedSessionCount += 1
+        totalsByModel[pricingCatalog.displayModelName(for: model), default: 0] += session.usage.totalTokens
+    }
+
     private func sessionUsage(from fileURL: URL) throws -> SessionUsage? {
-        let data = try Data(contentsOf: fileURL)
+        let data = try readTail(of: fileURL, maxBytes: 120_000)
         guard let text = String(data: data, encoding: .utf8) else {
             return nil
         }
@@ -82,6 +104,7 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         let decoder = JSONDecoder()
         var model: String?
         var latestUsage: TokenUsagePayload?
+        var latestTimestamp: Date?
 
         for line in text.split(whereSeparator: \.isNewline) {
             guard let entry = try? decoder.decode(TokenUsageLogEntry.self, from: Data(line.utf8)) else {
@@ -99,13 +122,29 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
             }
 
             latestUsage = usage
+            latestTimestamp = entry.timestamp.flatMap(Formatters.parseISO8601)
         }
 
         guard let latestUsage else {
             return nil
         }
 
-        return SessionUsage(model: model, usage: latestUsage)
+        let modifiedAt = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        return SessionUsage(
+            model: model,
+            usage: latestUsage,
+            updatedAt: latestTimestamp ?? modifiedAt ?? Date.distantPast
+        )
+    }
+
+    private func readTail(of fileURL: URL, maxBytes: Int) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? handle.close() }
+
+        let fileSize = try handle.seekToEnd()
+        let offset = max(0, Int64(fileSize) - Int64(maxBytes))
+        try handle.seek(toOffset: UInt64(offset))
+        return try handle.readToEnd() ?? Data()
     }
 }
 
@@ -115,6 +154,16 @@ struct TokenPricingCatalog: Sendable {
         let cachedInputPerMillion: Decimal
         let outputPerMillion: Decimal
         let displayName: String
+    }
+
+    struct Cost: Sendable {
+        let uncachedInput: Decimal
+        let cachedInput: Decimal
+        let output: Decimal
+
+        var total: Decimal {
+            uncachedInput + cachedInput + output
+        }
     }
 
     static let standard = TokenPricingCatalog(prices: [
@@ -130,7 +179,7 @@ struct TokenPricingCatalog: Sendable {
 
     private let prices: [String: Price]
 
-    func estimateCost(for model: String, usage: TokenUsagePayload) -> Decimal? {
+    func estimateCost(for model: String, usage: TokenUsagePayload) -> Cost? {
         guard let price = price(for: model) else {
             return nil
         }
@@ -140,7 +189,11 @@ struct TokenPricingCatalog: Sendable {
         let inputCost = Decimal(uncachedInput) / 1_000_000 * price.inputPerMillion
         let cachedCost = Decimal(cachedInput) / 1_000_000 * price.cachedInputPerMillion
         let outputCost = Decimal(usage.outputTokens) / 1_000_000 * price.outputPerMillion
-        return inputCost + cachedCost + outputCost
+        return Cost(
+            uncachedInput: inputCost,
+            cachedInput: cachedCost,
+            output: outputCost
+        )
     }
 
     func displayModelName(for model: String) -> String {
@@ -160,6 +213,7 @@ struct TokenPricingCatalog: Sendable {
 private struct SessionUsage {
     let model: String?
     let usage: TokenUsagePayload
+    let updatedAt: Date
 }
 
 struct TokenUsagePayload: Decodable, Equatable {
@@ -179,6 +233,7 @@ struct TokenUsagePayload: Decodable, Equatable {
 }
 
 private struct TokenUsageLogEntry: Decodable {
+    let timestamp: String?
     let type: String
     let payload: TokenUsageLogPayload?
 }

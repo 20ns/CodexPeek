@@ -91,6 +91,9 @@ struct TokenUsageSummary: Equatable {
     var reasoningOutputTokens: Int
     var totalTokens: Int
     var estimatedCostUSD: Decimal
+    var uncachedInputCostUSD: Decimal
+    var cachedInputCostUSD: Decimal
+    var outputCostUSD: Decimal
     var sessionCount: Int
     var pricedSessionCount: Int
     var topModel: String?
@@ -102,6 +105,9 @@ struct TokenUsageSummary: Equatable {
         reasoningOutputTokens: 0,
         totalTokens: 0,
         estimatedCostUSD: 0,
+        uncachedInputCostUSD: 0,
+        cachedInputCostUSD: 0,
+        outputCostUSD: 0,
         sessionCount: 0,
         pricedSessionCount: 0,
         topModel: nil
@@ -109,6 +115,22 @@ struct TokenUsageSummary: Equatable {
 
     var hasUsage: Bool {
         totalTokens > 0
+    }
+}
+
+struct TokenUsageReport: Equatable {
+    var week: TokenUsageSummary
+    var month: TokenUsageSummary
+    var allTime: TokenUsageSummary
+
+    static let empty = TokenUsageReport(
+        week: .empty,
+        month: .empty,
+        allTime: .empty
+    )
+
+    var hasUsage: Bool {
+        week.hasUsage || month.hasUsage || allTime.hasUsage
     }
 }
 

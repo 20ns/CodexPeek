@@ -256,26 +256,27 @@ final class TokenCostMenuItemView: NSView {
         nil
     }
 
-    func update(summary: TokenUsageSummary?) {
-        titleField.stringValue = "7-day API estimate"
+    func update(report: TokenUsageReport?) {
+        titleField.stringValue = "API-equivalent estimate"
 
-        guard let summary, summary.hasUsage else {
+        guard let report, report.hasUsage else {
             detailField.stringValue = "No local token data yet"
             modelField.stringValue = "Updates from Codex session logs"
             return
         }
 
-        let cost = UIFormatters.costString(summary.estimatedCostUSD)
-        let total = UIFormatters.compactTokenString(summary.totalTokens)
-        let input = UIFormatters.compactTokenString(summary.inputTokens)
-        let cached = UIFormatters.compactTokenString(summary.cachedInputTokens)
-        let output = UIFormatters.compactTokenString(summary.outputTokens)
+        let monthCost = UIFormatters.costString(report.month.estimatedCostUSD)
+        let allTimeCost = UIFormatters.costString(report.allTime.estimatedCostUSD)
+        let weekCost = UIFormatters.costString(report.week.estimatedCostUSD)
+        let weekTotal = UIFormatters.compactTokenString(report.week.totalTokens)
+        let cached = UIFormatters.compactTokenString(report.week.cachedInputTokens)
+        let cachedCost = UIFormatters.costString(report.week.cachedInputCostUSD)
 
-        detailField.stringValue = "\(cost) est • \(total) tokens"
-        if let topModel = summary.topModel {
-            modelField.stringValue = "\(topModel) • in \(input) • cached \(cached) • out \(output)"
+        detailField.stringValue = "Month \(monthCost) • all-time \(allTimeCost)"
+        if let topModel = report.week.topModel {
+            modelField.stringValue = "7d \(weekCost) • \(weekTotal) tokens • cached \(cached) = \(cachedCost) • \(topModel)"
         } else {
-            modelField.stringValue = "Unpriced models • in \(input) • cached \(cached) • out \(output)"
+            modelField.stringValue = "7d \(weekCost) • \(weekTotal) tokens • cached \(cached) = \(cachedCost)"
         }
     }
 
