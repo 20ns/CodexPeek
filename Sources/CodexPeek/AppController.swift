@@ -31,8 +31,6 @@ final class AppController: NSObject, NSMenuDelegate {
     private let tokenCostItem = NSMenuItem()
     private let statusItemView = NSMenuItem()
     private let accountsItem = NSMenuItem(title: "Accounts", action: nil, keyEquivalent: "")
-    private let refreshItem = NSMenuItem(title: "Refresh Now", action: #selector(refreshNow), keyEquivalent: "r")
-    private let copyDebugInfoItem = NSMenuItem(title: "Copy Debug Info", action: #selector(copyDebugInfo), keyEquivalent: "")
     private let launchAtLoginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     private let logoutItem = NSMenuItem(title: "Log Out", action: #selector(logOut), keyEquivalent: "")
     private let openCodexItem = NSMenuItem(title: "Open Codex", action: #selector(openCodex), keyEquivalent: "")
@@ -151,11 +149,11 @@ final class AppController: NSObject, NSMenuDelegate {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(debugSummary(), forType: .string)
-        copyDebugInfoItem.title = "Copied Debug Info"
+        headerView.toolTip = "Debug info copied"
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
             await MainActor.run {
-                self?.copyDebugInfoItem.title = "Copy Debug Info"
+                self?.headerView.toolTip = nil
             }
         }
     }
@@ -327,13 +325,17 @@ final class AppController: NSObject, NSMenuDelegate {
         statusItemView.view = statusView
         accountsItem.submenu = accountsMenu
 
-        refreshItem.target = self
-        copyDebugInfoItem.target = self
         launchAtLoginItem.target = self
         logoutItem.target = self
         openCodexItem.target = self
         removeAccountItem.target = self
         quitItem.target = self
+        headerView.onRefresh = { [weak self] in
+            self?.refreshNow()
+        }
+        headerView.onCopyDebugInfo = { [weak self] in
+            self?.copyDebugInfo()
+        }
 
         menu.addItem(headerItem)
         menu.addItem(.separator())
@@ -345,8 +347,6 @@ final class AppController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(accountsItem)
         menu.addItem(.separator())
-        menu.addItem(refreshItem)
-        menu.addItem(copyDebugInfoItem)
         menu.addItem(launchAtLoginItem)
         menu.addItem(logoutItem)
         menu.addItem(openCodexItem)
@@ -525,9 +525,6 @@ final class AppController: NSObject, NSMenuDelegate {
         renderAccountsMenu()
 
         launchAtLoginItem.state = launchAtLoginController.isEnabled ? .on : .off
-        refreshItem.title = refreshTask == nil ? "Refresh Now" : "Refreshing…"
-        refreshItem.isEnabled = refreshTask == nil
-        copyDebugInfoItem.isEnabled = true
         logoutItem.isEnabled = refreshTask == nil && activeAccountSnapshot?.isSignedIn == true
         openCodexItem.title = "Open Codex with Selected Account"
         openCodexItem.isEnabled = activeAccountSnapshot?.isSignedIn == true

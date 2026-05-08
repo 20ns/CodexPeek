@@ -4,6 +4,10 @@ import AppKit
 final class HeaderMenuItemView: NSView {
     private let titleField = NSTextField(labelWithString: "")
     private let subtitleField = NSTextField(labelWithString: "")
+    private let refreshButton = NSButton()
+    private let copyButton = NSButton()
+    var onRefresh: (() -> Void)?
+    var onCopyDebugInfo: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 52))
@@ -17,6 +21,7 @@ final class HeaderMenuItemView: NSView {
 
     func update(snapshot: CodexUsageSnapshot?, refreshState: RefreshState) {
         titleField.stringValue = snapshot?.displayAccountName ?? "Codex unavailable"
+        refreshButton.isEnabled = refreshState != .refreshing
 
         let detail: String
         if let snapshot {
@@ -53,14 +58,55 @@ final class HeaderMenuItemView: NSView {
         titleField.font = .systemFont(ofSize: 13, weight: .semibold)
         subtitleField.font = .systemFont(ofSize: 11)
         subtitleField.textColor = .secondaryLabelColor
+        titleField.lineBreakMode = .byTruncatingMiddle
+        titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        addSubview(stack)
+        configureIconButton(refreshButton, symbolName: "arrow.clockwise", tooltip: "Refresh usage", action: #selector(refreshTapped))
+        configureIconButton(copyButton, symbolName: "doc.on.doc", tooltip: "Copy debug info", action: #selector(copyTapped))
+
+        let controls = NSStackView(views: [refreshButton, copyButton])
+        controls.orientation = .horizontal
+        controls.alignment = .centerY
+        controls.spacing = 6
+        controls.translatesAutoresizingMaskIntoConstraints = false
+
+        let row = NSStackView(views: [stack, controls])
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(row)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10)
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10)
         ])
+    }
+
+    private func configureIconButton(_ button: NSButton, symbolName: String, tooltip: String, action: Selector) {
+        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: tooltip)
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.toolTip = tooltip
+        button.target = self
+        button.action = action
+        button.setButtonType(.momentaryChange)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 22),
+            button.heightAnchor.constraint(equalToConstant: 22)
+        ])
+    }
+
+    @objc private func refreshTapped() {
+        onRefresh?()
+    }
+
+    @objc private func copyTapped() {
+        onCopyDebugInfo?()
     }
 }
 
@@ -269,14 +315,13 @@ final class TokenCostMenuItemView: NSView {
         let allTimeCost = UIFormatters.costString(report.allTime.estimatedCostUSD)
         let weekCost = UIFormatters.costString(report.week.estimatedCostUSD)
         let weekTotal = UIFormatters.compactTokenString(report.week.totalTokens)
-        let cached = UIFormatters.compactTokenString(report.week.cachedInputTokens)
         let cachedCost = UIFormatters.costString(report.week.cachedInputCostUSD)
 
         detailField.stringValue = "Month \(monthCost) • all-time \(allTimeCost)"
         if let topModel = report.week.topModel {
-            modelField.stringValue = "7d \(weekCost) • \(weekTotal) tokens • cached \(cached) = \(cachedCost) • \(topModel)"
+            modelField.stringValue = "7d \(weekCost) = cached \(cachedCost) + input \(UIFormatters.costString(report.week.uncachedInputCostUSD)) + out \(UIFormatters.costString(report.week.outputCostUSD)) • \(weekTotal) • \(topModel)"
         } else {
-            modelField.stringValue = "7d \(weekCost) • \(weekTotal) tokens • cached \(cached) = \(cachedCost)"
+            modelField.stringValue = "7d \(weekCost) = cached \(cachedCost) + input \(UIFormatters.costString(report.week.uncachedInputCostUSD)) + out \(UIFormatters.costString(report.week.outputCostUSD)) • \(weekTotal)"
         }
     }
 
