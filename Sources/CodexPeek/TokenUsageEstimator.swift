@@ -4,6 +4,11 @@ protocol TokenUsageSource: Sendable {
     func usageReport() throws -> TokenUsageReport
 }
 
+protocol TokenUsageReportStoring: Sendable {
+    func load() throws -> TokenUsageReport?
+    func save(_ report: TokenUsageReport) throws
+}
+
 final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     private let sessionsRootURL: URL
     private let fileManager: FileManager
@@ -50,6 +55,7 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         report.week.topModel = weeklyTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
         report.month.topModel = monthlyTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
         report.allTime.topModel = allTimeTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
+        report.generatedAt = now
         return report
     }
 
@@ -165,6 +171,49 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         let offset = max(0, Int64(fileSize) - Int64(maxBytes))
         try handle.seek(toOffset: UInt64(offset))
         return try handle.readToEnd() ?? Data()
+    }
+}
+
+final class TokenUsageReportCacheStore: TokenUsageReportStoring, @unchecked Sendable {
+    private let cacheURL: URL
+    private let fileManager: FileManager
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+
+    init(
+        cacheURL: URL = TokenUsageReportCacheStore.defaultCacheURL(),
+        fileManager: FileManager = .default
+    ) {
+        self.cacheURL = cacheURL
+        self.fileManager = fileManager
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    }
+
+    func load() throws -> TokenUsageReport? {
+        guard fileManager.fileExists(atPath: cacheURL.path) else {
+            return nil
+        }
+
+        let data = try Data(contentsOf: cacheURL)
+        return try decoder.decode(TokenUsageReport.self, from: data)
+    }
+
+    func save(_ report: TokenUsageReport) throws {
+        try fileManager.createDirectory(
+            at: cacheURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let data = try encoder.encode(report)
+        try data.write(to: cacheURL, options: .atomic)
+    }
+
+    static func defaultCacheURL(profileID: String = "default") -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base
+            .appendingPathComponent("CodexPeek", isDirectory: true)
+            .appendingPathComponent("TokenReports", isDirectory: true)
+            .appendingPathComponent("\(profileID).json")
     }
 }
 

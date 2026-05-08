@@ -6,6 +6,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private static let refreshInterval: TimeInterval = 60
     private static let refreshTolerance: TimeInterval = 5
     private static let minimumRefreshSpacing: TimeInterval = 10
+    private static let tokenRefreshInterval: TimeInterval = 6 * 60 * 60
 
     private let accountStore: AccountProfileStore
     private let statusItem: NSStatusItem
@@ -39,8 +40,10 @@ final class AppController: NSObject, NSMenuDelegate {
 
     private var repository: UsageRepository?
     private var tokenUsageSource: TokenUsageSource?
+    private var tokenReportStore: TokenUsageReportStoring?
     private var refreshTimer: Timer?
     private var refreshTask: Task<Void, Never>?
+    private var tokenReportTask: Task<Void, Never>?
     private var snapshot: CodexUsageSnapshot?
     private var tokenReport: TokenUsageReport?
     private var refreshState: RefreshState = .idle
@@ -86,6 +89,7 @@ final class AppController: NSObject, NSMenuDelegate {
             }
 
             self.triggerRefresh(reason: "startup")
+            self.refreshTokenReportIfNeeded(force: false, delay: 30)
         }
     }
 
@@ -102,6 +106,7 @@ final class AppController: NSObject, NSMenuDelegate {
 
     @objc private func refreshNow() {
         triggerRefresh(reason: "manual", force: true)
+        refreshTokenReportIfNeeded(force: true, delay: 0)
     }
 
     @objc private func toggleLaunchAtLogin() {
@@ -440,7 +445,6 @@ final class AppController: NSObject, NSMenuDelegate {
                     return
                 }
                 self.snapshot = snapshot
-                self.tokenReport = try? self.tokenUsageSource?.usageReport()
                 self.refreshState = .idle
                 try self.syncAccountStateFromDisk()
             } catch {
@@ -718,6 +722,8 @@ final class AppController: NSObject, NSMenuDelegate {
         activeProfile = profile
         repository = makeRepository(for: profile)
         tokenUsageSource = CodexTokenUsageSource(sessionsRootURL: profile.sessionsURL)
+        tokenReportStore = TokenUsageReportCacheStore(cacheURL: TokenUsageReportCacheStore.defaultCacheURL(profileID: profile.id))
+        tokenReport = try? tokenReportStore?.load()
         installAuthFileWatcher(for: profile)
     }
 
@@ -736,7 +742,6 @@ final class AppController: NSObject, NSMenuDelegate {
         }
 
         snapshot = nil
-        tokenReport = nil
         refreshState = .idle
         configureActiveProfile(profile)
         render()
@@ -767,6 +772,45 @@ final class AppController: NSObject, NSMenuDelegate {
             cacheStore: SnapshotCacheStore(cacheURL: SnapshotCacheStore.defaultCacheURL(profileID: profile.id)),
             accountInfoSource: AuthJSONAccountInfoSource(authURL: profile.authURL)
         )
+    }
+
+    private func refreshTokenReportIfNeeded(force: Bool, delay: TimeInterval) {
+        guard tokenReportTask == nil, let tokenUsageSource, let tokenReportStore else {
+            return
+        }
+
+        if !force,
+           let generatedAt = tokenReport?.generatedAt,
+           Date().timeIntervalSince(generatedAt) < Self.tokenRefreshInterval {
+            return
+        }
+
+        tokenReportTask = Task.detached(priority: .utility) { [weak self, tokenUsageSource, tokenReportStore] in
+            if delay > 0 {
+                try? await Task.sleep(for: .seconds(delay))
+            }
+
+            guard !Task.isCancelled else {
+                await MainActor.run {
+                    self?.tokenReportTask = nil
+                }
+                return
+            }
+
+            do {
+                let report = try tokenUsageSource.usageReport()
+                try tokenReportStore.save(report)
+                await MainActor.run {
+                    self?.tokenReport = report
+                    self?.tokenReportTask = nil
+                    self?.render()
+                }
+            } catch {
+                await MainActor.run {
+                    self?.tokenReportTask = nil
+                }
+            }
+        }
     }
 
     private func codexEnvironment(for profile: AccountProfile) -> [String: String] {

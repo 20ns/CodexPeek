@@ -84,7 +84,7 @@ struct CodexUsageSnapshot: Codable, Equatable {
     }
 }
 
-struct TokenUsageSummary: Equatable {
+struct TokenUsageSummary: Codable, Equatable {
     var inputTokens: Int
     var cachedInputTokens: Int
     var outputTokens: Int
@@ -118,15 +118,17 @@ struct TokenUsageSummary: Equatable {
     }
 }
 
-struct TokenUsageReport: Equatable {
+struct TokenUsageReport: Codable, Equatable {
     var week: TokenUsageSummary
     var month: TokenUsageSummary
     var allTime: TokenUsageSummary
+    var generatedAt: Date?
 
     static let empty = TokenUsageReport(
         week: .empty,
         month: .empty,
-        allTime: .empty
+        allTime: .empty,
+        generatedAt: nil
     )
 
     var hasUsage: Bool {

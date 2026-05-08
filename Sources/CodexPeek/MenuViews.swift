@@ -309,23 +309,19 @@ final class TokenCostMenuItemView: NSView {
         titleField.stringValue = "API-equivalent estimate"
 
         guard let report, report.hasUsage else {
-            detailField.stringValue = "No local token data yet"
-            modelField.stringValue = "Updates from Codex session logs"
+            detailField.stringValue = "Calculating in background"
+            modelField.stringValue = "Uses local Codex session logs"
+            modelField.isHidden = false
             return
         }
 
+        let weekCost = UIFormatters.costString(report.week.estimatedCostUSD)
         let monthCost = UIFormatters.costString(report.month.estimatedCostUSD)
         let allTimeCost = UIFormatters.costString(report.allTime.estimatedCostUSD)
-        let weekCost = UIFormatters.costString(report.week.estimatedCostUSD)
-        let weekTotal = UIFormatters.compactTokenString(report.week.totalTokens)
-        let cachedCost = UIFormatters.costString(report.week.cachedInputCostUSD)
 
-        detailField.stringValue = "Month \(monthCost) • all-time \(allTimeCost)"
-        if let topModel = report.week.topModel {
-            modelField.stringValue = "7d \(weekCost) = cached \(cachedCost) + input \(UIFormatters.costString(report.week.uncachedInputCostUSD)) + out \(UIFormatters.costString(report.week.outputCostUSD)) • \(weekTotal) • \(topModel)"
-        } else {
-            modelField.stringValue = "7d \(weekCost) = cached \(cachedCost) + input \(UIFormatters.costString(report.week.uncachedInputCostUSD)) + out \(UIFormatters.costString(report.week.outputCostUSD)) • \(weekTotal)"
-        }
+        detailField.stringValue = "7d \(weekCost) • month \(monthCost) • all-time \(allTimeCost)"
+        modelField.stringValue = ""
+        modelField.isHidden = true
     }
 
     private func setup() {
