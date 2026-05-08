@@ -97,4 +97,30 @@ enum UIFormatters {
     static func accountRenewalString(from date: Date) -> String {
         accountRenewal.string(from: date)
     }
+
+    nonisolated static func compactTokenString(_ value: Int) -> String {
+        let absolute = Double(value)
+        if absolute >= 1_000_000 {
+            return String(format: "%.1fM", absolute / 1_000_000)
+        }
+
+        if absolute >= 1_000 {
+            return String(format: "%.1fk", absolute / 1_000)
+        }
+
+        return "\(value)"
+    }
+
+    nonisolated static func costString(_ value: Decimal) -> String {
+        let number = NSDecimalNumber(decimal: value)
+        if number.doubleValue >= 100 {
+            return String(format: "$%.0f", number.doubleValue)
+        }
+
+        if number.doubleValue >= 10 {
+            return String(format: "$%.1f", number.doubleValue)
+        }
+
+        return String(format: "$%.2f", number.doubleValue)
+    }
 }

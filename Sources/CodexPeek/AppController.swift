@@ -21,12 +21,14 @@ final class AppController: NSObject, NSMenuDelegate {
     private let primaryUsageView = UsageMenuItemView()
     private let secondaryUsageView = UsageMenuItemView()
     private let sparkUsageView = CompactSupplementalUsageMenuItemView()
+    private let tokenCostView = TokenCostMenuItemView()
     private let statusView = StatusMenuItemView()
 
     private let headerItem = NSMenuItem()
     private let primaryUsageItem = NSMenuItem()
     private let secondaryUsageItem = NSMenuItem()
     private let sparkUsageItem = NSMenuItem()
+    private let tokenCostItem = NSMenuItem()
     private let statusItemView = NSMenuItem()
     private let accountsItem = NSMenuItem(title: "Accounts", action: nil, keyEquivalent: "")
     private let refreshItem = NSMenuItem(title: "Refresh Now", action: #selector(refreshNow), keyEquivalent: "r")
@@ -38,9 +40,11 @@ final class AppController: NSObject, NSMenuDelegate {
     private let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
 
     private var repository: UsageRepository?
+    private var tokenUsageSource: TokenUsageSource?
     private var refreshTimer: Timer?
     private var refreshTask: Task<Void, Never>?
     private var snapshot: CodexUsageSnapshot?
+    private var tokenSummary: TokenUsageSummary?
     private var refreshState: RefreshState = .idle
     private var wakeObserver: NSObjectProtocol?
     private var lastRefreshStartAt: Date?
@@ -319,6 +323,7 @@ final class AppController: NSObject, NSMenuDelegate {
         primaryUsageItem.view = primaryUsageView
         secondaryUsageItem.view = secondaryUsageView
         sparkUsageItem.view = sparkUsageView
+        tokenCostItem.view = tokenCostView
         statusItemView.view = statusView
         accountsItem.submenu = accountsMenu
 
@@ -335,6 +340,7 @@ final class AppController: NSObject, NSMenuDelegate {
         menu.addItem(primaryUsageItem)
         menu.addItem(secondaryUsageItem)
         menu.addItem(sparkUsageItem)
+        menu.addItem(tokenCostItem)
         menu.addItem(statusItemView)
         menu.addItem(.separator())
         menu.addItem(accountsItem)
@@ -435,6 +441,7 @@ final class AppController: NSObject, NSMenuDelegate {
                     return
                 }
                 self.snapshot = snapshot
+                self.tokenSummary = try? self.tokenUsageSource?.weeklySummary()
                 self.refreshState = .idle
                 try self.syncAccountStateFromDisk()
             } catch {
@@ -513,6 +520,7 @@ final class AppController: NSObject, NSMenuDelegate {
         secondaryUsageView.update(title: "Weekly window", window: snapshot?.secondary)
         sparkUsageView.update(snapshot: snapshot?.spark)
         sparkUsageItem.isHidden = snapshot?.spark == nil
+        tokenCostView.update(summary: tokenSummary)
         statusView.update(snapshot: snapshot, refreshState: refreshState, accountStatus: accountStatusMessage())
         renderAccountsMenu()
 
@@ -713,6 +721,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private func configureActiveProfile(_ profile: AccountProfile) {
         activeProfile = profile
         repository = makeRepository(for: profile)
+        tokenUsageSource = CodexTokenUsageSource(sessionsRootURL: profile.sessionsURL)
         installAuthFileWatcher(for: profile)
     }
 
@@ -731,6 +740,7 @@ final class AppController: NSObject, NSMenuDelegate {
         }
 
         snapshot = nil
+        tokenSummary = nil
         refreshState = .idle
         configureActiveProfile(profile)
         render()
@@ -890,6 +900,8 @@ final class AppController: NSObject, NSMenuDelegate {
         let secondary = snapshot?.secondary.map { "\($0.usedPercent)%" } ?? "unavailable"
         let sparkPrimary = snapshot?.spark?.primary.map { "\($0.usedPercent)%" } ?? "unavailable"
         let sparkWeekly = snapshot?.spark?.secondary.map { "\($0.usedPercent)%" } ?? "unavailable"
+        let tokenCost = tokenSummary.map { UIFormatters.costString($0.estimatedCostUSD) } ?? "unavailable"
+        let tokenTotal = tokenSummary.map { UIFormatters.compactTokenString($0.totalTokens) } ?? "unavailable"
         let updatedAt = snapshot.map { UIFormatters.usageUpdatedString(from: $0.lastUpdatedAt) } ?? "never"
         let profileLabel = activeProfile?.displayName ?? "unknown"
         let profileHome = activeProfile?.homeURL.path ?? "unknown"
@@ -907,6 +919,8 @@ final class AppController: NSObject, NSMenuDelegate {
             "Weekly usage: \(secondary)",
             "Spark 5h usage: \(sparkPrimary)",
             "Spark weekly usage: \(sparkWeekly)",
+            "7-day token usage: \(tokenTotal)",
+            "7-day API estimate: \(tokenCost)",
             "Last updated: \(updatedAt)"
         ].joined(separator: "\n")
     }

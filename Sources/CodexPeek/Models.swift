@@ -84,6 +84,34 @@ struct CodexUsageSnapshot: Codable, Equatable {
     }
 }
 
+struct TokenUsageSummary: Equatable {
+    var inputTokens: Int
+    var cachedInputTokens: Int
+    var outputTokens: Int
+    var reasoningOutputTokens: Int
+    var totalTokens: Int
+    var estimatedCostUSD: Decimal
+    var sessionCount: Int
+    var pricedSessionCount: Int
+    var topModel: String?
+
+    static let empty = TokenUsageSummary(
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+        totalTokens: 0,
+        estimatedCostUSD: 0,
+        sessionCount: 0,
+        pricedSessionCount: 0,
+        topModel: nil
+    )
+
+    var hasUsage: Bool {
+        totalTokens > 0
+    }
+}
+
 enum UsageLevel: Equatable {
     case normal
     case warning

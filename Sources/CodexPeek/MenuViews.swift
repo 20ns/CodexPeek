@@ -241,6 +241,68 @@ final class CompactSupplementalUsageMenuItemView: NSView {
 }
 
 @MainActor
+final class TokenCostMenuItemView: NSView {
+    private let titleField = NSTextField(labelWithString: "")
+    private let detailField = NSTextField(labelWithString: "")
+    private let modelField = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 54))
+        translatesAutoresizingMaskIntoConstraints = false
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func update(summary: TokenUsageSummary?) {
+        titleField.stringValue = "7-day API estimate"
+
+        guard let summary, summary.hasUsage else {
+            detailField.stringValue = "No local token data yet"
+            modelField.stringValue = "Updates from Codex session logs"
+            return
+        }
+
+        let cost = UIFormatters.costString(summary.estimatedCostUSD)
+        let total = UIFormatters.compactTokenString(summary.totalTokens)
+        let input = UIFormatters.compactTokenString(summary.inputTokens)
+        let cached = UIFormatters.compactTokenString(summary.cachedInputTokens)
+        let output = UIFormatters.compactTokenString(summary.outputTokens)
+
+        detailField.stringValue = "\(cost) est • \(total) tokens"
+        if let topModel = summary.topModel {
+            modelField.stringValue = "\(topModel) • in \(input) • cached \(cached) • out \(output)"
+        } else {
+            modelField.stringValue = "Unpriced models • in \(input) • cached \(cached) • out \(output)"
+        }
+    }
+
+    private func setup() {
+        titleField.font = .systemFont(ofSize: 12, weight: .semibold)
+        detailField.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        modelField.font = .systemFont(ofSize: 11)
+        modelField.textColor = .secondaryLabelColor
+        modelField.lineBreakMode = .byTruncatingTail
+
+        let stack = NSStackView(views: [titleField, detailField, modelField])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8)
+        ])
+    }
+}
+
+@MainActor
 final class StatusMenuItemView: NSView {
     private let labelField = NSTextField(labelWithString: "")
 
