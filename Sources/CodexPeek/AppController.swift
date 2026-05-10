@@ -7,6 +7,8 @@ final class AppController: NSObject, NSMenuDelegate {
     private static let refreshTolerance: TimeInterval = 5
     private static let minimumRefreshSpacing: TimeInterval = 10
     private static let tokenRefreshInterval: TimeInterval = 6 * 60 * 60
+    private static let tokenRefreshTolerance: TimeInterval = 5 * 60
+    private static let tokenStartupDelay: TimeInterval = 30
 
     private let accountStore: AccountProfileStore
     private let statusItem: NSStatusItem
@@ -42,6 +44,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private var tokenUsageSource: TokenUsageSource?
     private var tokenReportStore: TokenUsageReportStoring?
     private var refreshTimer: Timer?
+    private var tokenRefreshTimer: Timer?
     private var refreshTask: Task<Void, Never>?
     private var tokenReportTask: Task<Void, Never>?
     private var snapshot: CodexUsageSnapshot?
@@ -68,6 +71,7 @@ final class AppController: NSObject, NSMenuDelegate {
         configureMenu()
         installWakeObserver()
         scheduleRefreshTimer()
+        scheduleTokenRefreshTimer()
 
         do {
             try codexDesktopAuthStore.bootstrapDefaultSnapshotIfNeeded()
@@ -89,7 +93,7 @@ final class AppController: NSObject, NSMenuDelegate {
             }
 
             self.triggerRefresh(reason: "startup")
-            self.refreshTokenReportIfNeeded(force: false, delay: 30)
+            self.refreshTokenReportIfNeeded(force: false, delay: Self.tokenStartupDelay)
         }
     }
 
@@ -102,6 +106,7 @@ final class AppController: NSObject, NSMenuDelegate {
 
         render()
         triggerRefresh(reason: "menu")
+        refreshTokenReportIfNeeded(force: false, delay: 0)
     }
 
     @objc private func refreshNow() {
@@ -367,6 +372,7 @@ final class AppController: NSObject, NSMenuDelegate {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.triggerRefresh(reason: "wake")
+                self?.refreshTokenReportIfNeeded(force: false, delay: 15)
             }
         }
     }
@@ -391,6 +397,15 @@ final class AppController: NSObject, NSMenuDelegate {
             }
         }
         refreshTimer?.tolerance = Self.refreshTolerance
+    }
+
+    private func scheduleTokenRefreshTimer() {
+        tokenRefreshTimer = Timer.scheduledTimer(withTimeInterval: Self.tokenRefreshInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshTokenReportIfNeeded(force: false, delay: 0)
+            }
+        }
+        tokenRefreshTimer?.tolerance = Self.tokenRefreshTolerance
     }
 
     private func triggerRefresh(reason: String, force: Bool = false) {
@@ -719,9 +734,14 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func configureActiveProfile(_ profile: AccountProfile) {
+        tokenReportTask?.cancel()
+        tokenReportTask = nil
         activeProfile = profile
         repository = makeRepository(for: profile)
-        tokenUsageSource = CodexTokenUsageSource(sessionsRootURL: profile.sessionsURL)
+        tokenUsageSource = CodexTokenUsageSource(
+            sessionsRootURL: profile.sessionsURL,
+            indexStore: TokenUsageSessionIndexStore(cacheURL: TokenUsageSessionIndexStore.defaultCacheURL(profileID: profile.id))
+        )
         tokenReportStore = TokenUsageReportCacheStore(cacheURL: TokenUsageReportCacheStore.defaultCacheURL(profileID: profile.id))
         tokenReport = try? tokenReportStore?.load()
         installAuthFileWatcher(for: profile)
@@ -775,7 +795,10 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func refreshTokenReportIfNeeded(force: Bool, delay: TimeInterval) {
-        guard tokenReportTask == nil, let tokenUsageSource, let tokenReportStore else {
+        guard tokenReportTask == nil,
+              let tokenUsageSource,
+              let tokenReportStore,
+              let activeProfile else {
             return
         }
 
@@ -785,13 +808,18 @@ final class AppController: NSObject, NSMenuDelegate {
             return
         }
 
-        tokenReportTask = Task.detached(priority: .utility) { [weak self, tokenUsageSource, tokenReportStore] in
+        let profileID = activeProfile.id
+
+        tokenReportTask = Task.detached(priority: .utility) { [weak self, profileID, tokenUsageSource, tokenReportStore] in
             if delay > 0 {
                 try? await Task.sleep(for: .seconds(delay))
             }
 
             guard !Task.isCancelled else {
                 await MainActor.run {
+                    guard self?.activeProfile?.id == profileID else {
+                        return
+                    }
                     self?.tokenReportTask = nil
                 }
                 return
@@ -801,12 +829,18 @@ final class AppController: NSObject, NSMenuDelegate {
                 let report = try tokenUsageSource.usageReport()
                 try tokenReportStore.save(report)
                 await MainActor.run {
+                    guard self?.activeProfile?.id == profileID else {
+                        return
+                    }
                     self?.tokenReport = report
                     self?.tokenReportTask = nil
                     self?.render()
                 }
             } catch {
                 await MainActor.run {
+                    guard self?.activeProfile?.id == profileID else {
+                        return
+                    }
                     self?.tokenReportTask = nil
                 }
             }

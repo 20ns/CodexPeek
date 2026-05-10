@@ -34,12 +34,15 @@ final class CodexSessionLogUsageSource: SessionLogUsageSource, @unchecked Sendab
             return []
         }
 
-        var files: [URL] = []
+        var files: [(url: URL, modifiedAt: Date)] = []
         for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" {
-            files.append(fileURL)
+            let modifiedAt = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date.distantPast
+            files.append((fileURL, modifiedAt))
         }
 
-        return files.sorted { $0.path > $1.path }
+        return files
+            .sorted { lhs, rhs in lhs.modifiedAt > rhs.modifiedAt }
+            .map(\.url)
     }
 
     private func snapshot(from fileURL: URL) throws -> CodexUsageSnapshot? {

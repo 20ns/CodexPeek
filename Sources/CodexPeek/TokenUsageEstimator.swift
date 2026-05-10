@@ -9,19 +9,27 @@ protocol TokenUsageReportStoring: Sendable {
     func save(_ report: TokenUsageReport) throws
 }
 
+protocol TokenUsageSessionIndexStoring: Sendable {
+    func load() throws -> TokenUsageSessionIndex?
+    func save(_ index: TokenUsageSessionIndex) throws
+}
+
 final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     private let sessionsRootURL: URL
     private let fileManager: FileManager
     private let pricingCatalog: TokenPricingCatalog
+    private let indexStore: TokenUsageSessionIndexStoring?
 
     init(
         sessionsRootURL: URL = URL(fileURLWithPath: NSString(string: "~/.codex/sessions").expandingTildeInPath),
         fileManager: FileManager = .default,
-        pricingCatalog: TokenPricingCatalog = .standard
+        pricingCatalog: TokenPricingCatalog = .standard,
+        indexStore: TokenUsageSessionIndexStoring? = nil
     ) {
         self.sessionsRootURL = sessionsRootURL
         self.fileManager = fileManager
         self.pricingCatalog = pricingCatalog
+        self.indexStore = indexStore
     }
 
     func usageReport() throws -> TokenUsageReport {
@@ -29,15 +37,26 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         let weekCutoff = now.addingTimeInterval(-7 * 24 * 60 * 60)
         let monthCutoff = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: now)) ?? weekCutoff
         let files = try sessionLogFiles()
+        var index = (try? indexStore?.load()) ?? TokenUsageSessionIndex()
+        let currentPaths = Set(files.map(\.path))
+        index.sessions = index.sessions.filter { currentPaths.contains($0.key) }
         var report = TokenUsageReport.empty
         var weeklyTotalsByModel: [String: Int] = [:]
         var monthlyTotalsByModel: [String: Int] = [:]
         var allTimeTotalsByModel: [String: Int] = [:]
 
-        for fileURL in files {
-            guard let session = try autoreleasepool(invoking: {
-                try sessionUsage(from: fileURL)
-            }) else {
+        for file in files {
+            let session: SessionUsage?
+            if let cached = index.sessions[file.path], cached.matches(file) {
+                session = cached.session
+            } else {
+                session = try autoreleasepool(invoking: {
+                    try sessionUsage(from: file.url)
+                })
+                index.sessions[file.path] = IndexedSessionUsage(file: file, session: session)
+            }
+
+            guard let session else {
                 continue
             }
 
@@ -56,21 +75,28 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         report.month.topModel = monthlyTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
         report.allTime.topModel = allTimeTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
         report.generatedAt = now
+        try? indexStore?.save(index)
         return report
     }
 
-    private func sessionLogFiles() throws -> [URL] {
+    private func sessionLogFiles() throws -> [SessionLogFile] {
         guard let enumerator = fileManager.enumerator(
             at: sessionsRootURL,
-            includingPropertiesForKeys: [.contentModificationDateKey],
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
             options: [.skipsHiddenFiles]
         ) else {
             return []
         }
 
-        var files: [URL] = []
+        var files: [SessionLogFile] = []
         for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" {
-            files.append(fileURL)
+            let values = try fileURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            files.append(SessionLogFile(
+                url: fileURL,
+                path: fileURL.path,
+                size: values.fileSize ?? 0,
+                modifiedAt: values.contentModificationDate ?? Date.distantPast
+            ))
         }
 
         return files
@@ -171,6 +197,53 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         let offset = max(0, Int64(fileSize) - Int64(maxBytes))
         try handle.seek(toOffset: UInt64(offset))
         return try handle.readToEnd() ?? Data()
+    }
+}
+
+final class TokenUsageSessionIndexStore: TokenUsageSessionIndexStoring, @unchecked Sendable {
+    private let cacheURL: URL
+    private let fileManager: FileManager
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+
+    init(
+        cacheURL: URL = TokenUsageSessionIndexStore.defaultCacheURL(),
+        fileManager: FileManager = .default
+    ) {
+        self.cacheURL = cacheURL
+        self.fileManager = fileManager
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    }
+
+    func load() throws -> TokenUsageSessionIndex? {
+        guard fileManager.fileExists(atPath: cacheURL.path) else {
+            return nil
+        }
+
+        let data = try Data(contentsOf: cacheURL)
+        let index = try decoder.decode(TokenUsageSessionIndex.self, from: data)
+        guard index.schemaVersion == TokenUsageSessionIndex.schemaVersion else {
+            return nil
+        }
+        return index
+    }
+
+    func save(_ index: TokenUsageSessionIndex) throws {
+        try fileManager.createDirectory(
+            at: cacheURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let data = try encoder.encode(index)
+        try data.write(to: cacheURL, options: .atomic)
+    }
+
+    static func defaultCacheURL(profileID: String = "default") -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base
+            .appendingPathComponent("CodexPeek", isDirectory: true)
+            .appendingPathComponent("TokenSessionIndexes", isDirectory: true)
+            .appendingPathComponent("\(profileID).json")
     }
 }
 
@@ -275,17 +348,51 @@ struct TokenPricingCatalog: Sendable {
             return exact
         }
 
-        return prices.first { normalized.hasPrefix($0.key) }?.value
+        return prices
+            .sorted { lhs, rhs in lhs.key.count > rhs.key.count }
+            .first { normalized.hasPrefix($0.key) }?.value
     }
 }
 
-private struct SessionUsage {
+struct SessionLogFile {
+    let url: URL
+    let path: String
+    let size: Int
+    let modifiedAt: Date
+}
+
+struct TokenUsageSessionIndex: Codable {
+    static let schemaVersion = 1
+
+    var schemaVersion = TokenUsageSessionIndex.schemaVersion
+    var sessions: [String: IndexedSessionUsage] = [:]
+}
+
+struct IndexedSessionUsage: Codable {
+    let path: String
+    let size: Int
+    let modifiedAt: Date
+    let session: SessionUsage?
+
+    init(file: SessionLogFile, session: SessionUsage?) {
+        self.path = file.path
+        self.size = file.size
+        self.modifiedAt = file.modifiedAt
+        self.session = session
+    }
+
+    func matches(_ file: SessionLogFile) -> Bool {
+        path == file.path && size == file.size && modifiedAt == file.modifiedAt
+    }
+}
+
+struct SessionUsage: Codable {
     let model: String?
     let usage: TokenUsagePayload
     let updatedAt: Date
 }
 
-struct TokenUsagePayload: Decodable, Equatable {
+struct TokenUsagePayload: Codable, Equatable {
     let inputTokens: Int
     let cachedInputTokens: Int
     let outputTokens: Int
