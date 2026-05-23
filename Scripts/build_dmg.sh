@@ -12,6 +12,8 @@ mkdir -p "$DIST_DIR"
 rm -rf "$STAGING_DIR"
 mkdir -p "$STAGING_DIR"
 
+cd "$ROOT_DIR"
+swift run CodexPeek --self-test
 "$ROOT_DIR/Scripts/build_app.sh"
 
 ditto "$APP_PATH" "$STAGING_DIR/${APP_NAME}.app"

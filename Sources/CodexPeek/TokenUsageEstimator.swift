@@ -129,10 +129,14 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
 
     private func sessionUsage(from fileURL: URL) throws -> SessionUsage? {
         let headData = try readHead(of: fileURL, maxBytes: 2_000_000)
-        let tailData = try readTail(of: fileURL, maxBytes: 160_000)
-        guard let headText = String(data: headData, encoding: .utf8),
-              let tailText = String(data: tailData, encoding: .utf8) else {
+        let tail = try readTail(of: fileURL, maxBytes: 160_000)
+        guard let headText = String(data: headData, encoding: .utf8) else {
             return nil
+        }
+        let tailText = String(decoding: tail.data, as: UTF8.self)
+        var tailLines = tailText.split(whereSeparator: \.isNewline)
+        if tail.startedMidFile, !tailLines.isEmpty {
+            tailLines.removeFirst()
         }
 
         let decoder = JSONDecoder()
@@ -140,7 +144,7 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         var latestUsage: TokenUsagePayload?
         var latestTimestamp: Date?
 
-        for line in tailText.split(whereSeparator: \.isNewline) {
+        for line in tailLines {
             guard let entry = try? decoder.decode(TokenUsageLogEntry.self, from: Data(line.utf8)) else {
                 continue
             }
@@ -189,14 +193,14 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         return try handle.read(upToCount: maxBytes) ?? Data()
     }
 
-    private func readTail(of fileURL: URL, maxBytes: Int) throws -> Data {
+    private func readTail(of fileURL: URL, maxBytes: Int) throws -> (data: Data, startedMidFile: Bool) {
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
 
         let fileSize = try handle.seekToEnd()
         let offset = max(0, Int64(fileSize) - Int64(maxBytes))
         try handle.seek(toOffset: UInt64(offset))
-        return try handle.readToEnd() ?? Data()
+        return (try handle.readToEnd() ?? Data(), offset > 0)
     }
 }
 

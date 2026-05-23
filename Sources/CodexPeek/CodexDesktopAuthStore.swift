@@ -1,6 +1,8 @@
 import Foundation
 
 final class CodexDesktopAuthStore: @unchecked Sendable {
+    private static let uncertainOwnerProfileID = "__codexpeek_uncertain_owner__"
+
     private let fileManager: FileManager
     private let systemHomeURL: URL
     private let defaultSnapshotURL: URL
@@ -37,7 +39,7 @@ final class CodexDesktopAuthStore: @unchecked Sendable {
     }
 
     func shouldSyncDefaultSnapshotFromSystemAuth(among profiles: [AccountProfile]) throws -> Bool {
-        try currentOwnerProfileID(among: profiles) == AccountProfileStore.defaultProfileID
+        try shouldSyncDefaultFromCurrentSystemAuth(among: profiles)
     }
 
     func accountInfoURL(for profile: AccountProfile, among profiles: [AccountProfile]) throws -> URL {
@@ -59,8 +61,6 @@ final class CodexDesktopAuthStore: @unchecked Sendable {
     }
 
     func reconcileSystemAuth(among profiles: [AccountProfile]) throws {
-        try bootstrapDefaultSnapshotIfNeeded()
-
         let ownerProfileID = try loadOwnerProfileID()
         if let ownerProfileID,
            ownerProfileID != AccountProfileStore.defaultProfileID,
@@ -68,42 +68,47 @@ final class CodexDesktopAuthStore: @unchecked Sendable {
            fileManager.fileExists(atPath: systemAuthURL.path) {
             if try systemAuthBelongs(to: owner) {
                 _ = try syncAuthIfNeeded(from: systemAuthURL, to: owner.authURL)
-            } else {
-                try saveOwnerProfileID(AccountProfileStore.defaultProfileID)
-                try syncDefaultSnapshotFromSystemAuth()
             }
             return
         }
 
         if let ownerProfileID,
            ownerProfileID != AccountProfileStore.defaultProfileID {
-            try saveOwnerProfileID(AccountProfileStore.defaultProfileID)
+            if let inferredOwnerID = try managedProfileIDMatchingSystemAuth(in: profiles) {
+                try saveOwnerProfileID(inferredOwnerID)
+            }
+            return
         }
 
-        if try currentOwnerProfileID(among: profiles) == AccountProfileStore.defaultProfileID {
+        if try shouldSyncDefaultFromCurrentSystemAuth(among: profiles) {
             try syncDefaultSnapshotFromSystemAuth()
         }
     }
 
     func prepareSystemAuth(for profile: AccountProfile, among profiles: [AccountProfile] = []) throws -> Bool {
-        try bootstrapDefaultSnapshotIfNeeded()
         if !profiles.isEmpty {
             try reconcileSystemAuth(among: profiles)
         }
 
-        let changed: Bool
         switch profile.kind {
         case .systemDefault:
-            changed = try syncAuthIfNeeded(from: defaultSnapshotURL, to: systemAuthURL)
+            guard fileManager.fileExists(atPath: defaultSnapshotURL.path) else {
+                throw CodexUsageError.invalidResponse("Default account is not signed in")
+            }
+            let changed = try syncAuthIfNeeded(from: defaultSnapshotURL, to: systemAuthURL)
+            try saveOwnerProfileID(profile.id)
+            return changed
         case .managed:
             guard fileManager.fileExists(atPath: profile.authURL.path) else {
                 throw CodexUsageError.invalidResponse("Selected account is not signed in")
             }
-            changed = try syncAuthIfNeeded(from: profile.authURL, to: systemAuthURL)
+            if try shouldSyncDefaultFromCurrentSystemAuth(among: profiles) {
+                try syncDefaultSnapshotFromSystemAuth()
+            }
+            let changed = try syncAuthIfNeeded(from: profile.authURL, to: systemAuthURL)
+            try saveOwnerProfileID(profile.id)
+            return changed
         }
-
-        try saveOwnerProfileID(profile.id)
-        return changed
     }
 
     func restoreDefaultIfSystemAuthOwned(by profile: AccountProfile, among profiles: [AccountProfile]) throws -> Bool {
@@ -138,6 +143,19 @@ final class CodexDesktopAuthStore: @unchecked Sendable {
 
     private var systemAuthURL: URL {
         systemHomeURL.appendingPathComponent("auth.json")
+    }
+
+    private func shouldSyncDefaultFromCurrentSystemAuth(among profiles: [AccountProfile]) throws -> Bool {
+        guard fileManager.fileExists(atPath: systemAuthURL.path) else {
+            return false
+        }
+
+        if let ownerProfileID = try loadOwnerProfileID(),
+           ownerProfileID != AccountProfileStore.defaultProfileID {
+            return false
+        }
+
+        return try managedProfileIDMatchingSystemAuth(in: profiles) == nil
     }
 
     private func currentOwnerProfileID(among profiles: [AccountProfile]) throws -> String {
@@ -205,18 +223,22 @@ final class CodexDesktopAuthStore: @unchecked Sendable {
             return nil
         }
 
-        let data = try Data(contentsOf: ownerStateURL)
-        return try decoder.decode(DesktopAuthOwnerState.self, from: data).profileID
+        do {
+            let data = try Data(contentsOf: ownerStateURL)
+            return try decoder.decode(DesktopAuthOwnerState.self, from: data).profileID
+        } catch {
+            try quarantineCorruptFile(at: ownerStateURL)
+            try saveOwnerProfileID(Self.uncertainOwnerProfileID)
+            return Self.uncertainOwnerProfileID
+        }
     }
 
     private func saveOwnerProfileID(_ profileID: String) throws {
-        try fileManager.createDirectory(
-            at: ownerStateURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
+        try createPrivateDirectory(at: ownerStateURL.deletingLastPathComponent())
 
         let data = try encoder.encode(DesktopAuthOwnerState(profileID: profileID))
         try data.write(to: ownerStateURL, options: .atomic)
+        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: ownerStateURL.path)
     }
 
     private func syncAuthIfNeeded(from sourceURL: URL, to destinationURL: URL) throws -> Bool {
@@ -224,10 +246,6 @@ final class CodexDesktopAuthStore: @unchecked Sendable {
         let destinationExists = fileManager.fileExists(atPath: destinationURL.path)
 
         guard sourceExists else {
-            if destinationExists {
-                try fileManager.removeItem(at: destinationURL)
-                return true
-            }
             return false
         }
 
@@ -239,18 +257,36 @@ final class CodexDesktopAuthStore: @unchecked Sendable {
             }
         }
 
-        try fileManager.createDirectory(
-            at: destinationURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
+        try createPrivateDirectory(at: destinationURL.deletingLastPathComponent())
         try sourceData.write(to: destinationURL, options: .atomic)
+        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destinationURL.path)
         return true
+    }
+
+    private func createPrivateDirectory(at url: URL) throws {
+        try fileManager.createDirectory(
+            at: url,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
     }
 
     private func removeFileIfExists(at url: URL) throws {
         if fileManager.fileExists(atPath: url.path) {
             try fileManager.removeItem(at: url)
         }
+    }
+
+    private func quarantineCorruptFile(at url: URL) throws {
+        guard fileManager.fileExists(atPath: url.path) else {
+            return
+        }
+
+        let quarantineURL = url.deletingLastPathComponent()
+            .appendingPathComponent("\(url.lastPathComponent).bad-\(Int(Date().timeIntervalSince1970))")
+        try? fileManager.removeItem(at: quarantineURL)
+        try fileManager.moveItem(at: url, to: quarantineURL)
     }
 }
 

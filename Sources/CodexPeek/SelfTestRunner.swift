@@ -22,18 +22,22 @@ struct SelfTestRunner {
 
     private func testTranscriptParser() throws {
         let accountLine = #"{"id":2,"result":{"account":{"type":"chatgpt","email":"nav@example.com","planType":"plus"},"requiresOpenaiAuth":true}}"#
-        let rateLine = #"{"id":3,"result":{"rateLimits":{"limitId":"fallback","primary":{"usedPercent":1,"windowDurationMins":300,"resetsAt":1773017651},"secondary":{"usedPercent":2,"windowDurationMins":10080,"resetsAt":1773533321},"planType":"plus"},"rateLimitsByLimitId":{"codex":{"limitId":"codex","primary":{"usedPercent":33,"windowDurationMins":300,"resetsAt":1773017651},"secondary":{"usedPercent":55,"windowDurationMins":10080,"resetsAt":1773533321},"planType":"plus"},"codex_bengalfox":{"limitId":"codex_bengalfox","limitName":"GPT-5.3-Codex-Spark","primary":{"usedPercent":4,"windowDurationMins":300,"resetsAt":1773017651},"secondary":{"usedPercent":7,"windowDurationMins":10080,"resetsAt":1773533321},"planType":"plus"}}}}"#
+        let rateLine = #"{"id":3,"result":{"rateLimits":{"limitId":"fallback","primary":{"usedPercent":1,"windowDurationMins":300,"resetsAt":1773017651},"secondary":{"usedPercent":2,"windowDurationMins":10080,"resetsAt":1773533321},"planType":"plus"},"rateLimitsByLimitId":{"codex":{"limitId":"codex","primary":{"usedPercent":33.4,"windowDurationMins":300,"resetsAt":1773017651},"secondary":{"usedPercent":155,"windowDurationMins":10080,"resetsAt":1773533321},"planType":"new-plan"},"codex_bengalfox":{"limitId":"codex_bengalfox","limitName":"GPT-5.3-Codex-Spark","primary":{"usedPercent":4,"windowDurationMins":300,"resetsAt":1773017651},"secondary":{"usedPercent":7,"windowDurationMins":10080,"resetsAt":1773533321},"planType":"plus"}}}}"#
+        let unknownAccountLine = #"{"id":2,"result":{"account":{"type":"future"},"requiresOpenaiAuth":true}}"#
 
         let accountEnvelope = try AppServerLineParser.decode(AppServerAccountReadResponse.self, from: accountLine)
+        let unknownAccountEnvelope = try AppServerLineParser.decode(AppServerAccountReadResponse.self, from: unknownAccountLine)
         let rateEnvelope = try AppServerLineParser.decode(AppServerRateLimitsResponse.self, from: rateLine)
         let rateResult = try unwrap(rateEnvelope.result, "missing rate result")
         let selected = AppServerRateLimitSelector.selectCodexSnapshot(from: rateResult)
         let spark = AppServerRateLimitSelector.selectSparkSnapshot(from: rateResult)
 
         try expect(accountEnvelope.result?.account == AppServerAccount.chatgpt(email: "nav@example.com", planType: .plus), "parser account mismatch")
+        try expect(unknownAccountEnvelope.result?.account == .unknown, "unknown account should decode without breaking refresh")
         try expect(selected.limitId == "codex", "selector did not choose codex bucket")
         try expect(selected.primary?.usedPercent == 33, "primary percent mismatch")
-        try expect(selected.secondary?.usedPercent == 55, "secondary percent mismatch")
+        try expect(selected.secondary?.usedPercent == 100, "secondary percent should clamp")
+        try expect(selected.planType == .unknown, "unknown plan should decode as unknown")
         try expect(spark?.limitId == "codex_bengalfox", "selector did not choose spark bucket")
     }
 
@@ -70,6 +74,54 @@ struct SelfTestRunner {
 
         let revertedState = try store.setActiveProfileID("default")
         try expect(revertedState.activeProfileID == "default", "active profile should switch back to default")
+
+        let tamperedRoot = tempDirectory.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: tamperedRoot, withIntermediateDirectories: true)
+        let tamperedStateURL = tempDirectory.appendingPathComponent("tampered-accounts.json")
+        let safeID = "11111111-1111-1111-1111-111111111111"
+        let tamperedJSON = """
+        {
+          "activeProfileID": "\(safeID)",
+          "profiles": [
+            {
+              "homePath": "\(tamperedRoot.path)",
+              "id": "evil-default",
+              "kind": "systemDefault"
+            },
+            {
+              "homePath": "\(tamperedRoot.path)",
+              "id": "\(safeID)",
+              "kind": "managed"
+            }
+          ]
+        }
+        """
+        try Data(tamperedJSON.utf8).write(to: tamperedStateURL)
+        let tamperedStore = AccountProfileStore(
+            stateURL: tamperedStateURL,
+            managedProfilesRootURL: tempDirectory.appendingPathComponent("TamperedProfiles", isDirectory: true)
+        )
+        let normalizedTamperedState = try tamperedStore.loadState()
+        try expect(
+            !normalizedTamperedState.profiles.contains { $0.id == "evil-default" },
+            "non-default system profiles should be dropped"
+        )
+        let normalizedProfile = try unwrap(
+            normalizedTamperedState.profiles.first { $0.id == safeID },
+            "tampered managed profile should normalize"
+        )
+        try expect(normalizedProfile.homePath != tamperedRoot.path, "managed profile home should not trust accounts.json")
+        _ = try tamperedStore.deleteManagedProfile(id: safeID)
+        try expect(FileManager.default.fileExists(atPath: tamperedRoot.path), "delete should not remove tampered external path")
+
+        try Data("{not-json".utf8).write(to: tamperedStateURL)
+        let recoveredState = try tamperedStore.loadState()
+        try expect(recoveredState.activeProfileID == AccountProfileStore.defaultProfileID, "corrupt account state should recover to default")
+        let quarantinedAccountFiles = try FileManager.default.contentsOfDirectory(
+            at: tamperedStateURL.deletingLastPathComponent(),
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix("tampered-accounts.json.bad-") }
+        try expect(!quarantinedAccountFiles.isEmpty, "corrupt account state should be quarantined")
     }
 
     private func testDuplicateProfileRecoveryCandidates() throws {
@@ -208,6 +260,94 @@ struct SelfTestRunner {
 
         try store.clearPersistedAuth(for: defaultProfile, among: [managedProfile])
         try expect(!FileManager.default.fileExists(atPath: defaultSnapshotURL.path), "default auth snapshot should be removed on clean logout")
+
+        try Data(defaultAuth.utf8).write(to: defaultSnapshotURL)
+        try FileManager.default.removeItem(at: systemAuthURL)
+        try store.syncDefaultSnapshotFromSystemAuth()
+        try expect(FileManager.default.fileExists(atPath: defaultSnapshotURL.path), "missing system auth should not delete default snapshot")
+
+        try FileManager.default.removeItem(at: defaultSnapshotURL)
+        try Data(managedAuth.utf8).write(to: systemAuthURL)
+        let missingDefaultStore = CodexDesktopAuthStore(
+            fileManager: .default,
+            systemHomeURL: systemHomeURL,
+            defaultSnapshotURL: defaultSnapshotURL,
+            ownerStateURL: tempDirectory.appendingPathComponent("missing-default-owner.json")
+        )
+        do {
+            _ = try missingDefaultStore.prepareSystemAuth(for: defaultProfile, among: [managedProfile])
+            throw CodexUsageError.invalidResponse("missing default snapshot should prevent default switch")
+        } catch CodexUsageError.invalidResponse {
+            let preservedSystemAuth = try String(contentsOf: systemAuthURL, encoding: .utf8)
+            try expect(preservedSystemAuth == managedAuth, "failed default switch should not alter system auth")
+        }
+
+        let borrowedDefaultURL = tempDirectory.appendingPathComponent("borrowed-default/auth.json")
+        let borrowedOwnerURL = tempDirectory.appendingPathComponent("borrowed-owner.json")
+        try Data(managedAuth.utf8).write(to: systemAuthURL)
+        try Data(#"{"profileID":"managed"}"#.utf8).write(to: borrowedOwnerURL)
+        let borrowedStore = CodexDesktopAuthStore(
+            fileManager: .default,
+            systemHomeURL: systemHomeURL,
+            defaultSnapshotURL: borrowedDefaultURL,
+            ownerStateURL: borrowedOwnerURL
+        )
+        try borrowedStore.reconcileSystemAuth(among: [managedProfile])
+        try expect(
+            !FileManager.default.fileExists(atPath: borrowedDefaultURL.path),
+            "borrowed managed auth should not bootstrap a default snapshot"
+        )
+
+        let staleBorrowedOwnerURL = tempDirectory.appendingPathComponent("stale-borrowed-owner.json")
+        let staleBorrowedDefaultURL = tempDirectory.appendingPathComponent("stale-borrowed-default/auth.json")
+        try Data(managedAuth.utf8).write(to: systemAuthURL)
+        try Data(#"{"profileID":"removed-managed"}"#.utf8).write(to: staleBorrowedOwnerURL)
+        let staleBorrowedStore = CodexDesktopAuthStore(
+            fileManager: .default,
+            systemHomeURL: systemHomeURL,
+            defaultSnapshotURL: staleBorrowedDefaultURL,
+            ownerStateURL: staleBorrowedOwnerURL
+        )
+        try staleBorrowedStore.reconcileSystemAuth(among: [])
+        try expect(
+            !FileManager.default.fileExists(atPath: staleBorrowedDefaultURL.path),
+            "stale borrowed owner should not relabel system auth as default"
+        )
+        let shouldSyncStaleBorrowedDefault = try staleBorrowedStore.shouldSyncDefaultSnapshotFromSystemAuth(among: [])
+        try expect(!shouldSyncStaleBorrowedDefault, "stale borrowed owner should block default snapshot sync")
+
+        let mismatchedOwnerURL = tempDirectory.appendingPathComponent("mismatched-owner.json")
+        let mismatchedDefaultURL = tempDirectory.appendingPathComponent("mismatched-default/auth.json")
+        try Data(defaultAuth.utf8).write(to: managedAuthURL)
+        try Data(managedRefreshedAuth.utf8).write(to: systemAuthURL)
+        try Data(#"{"profileID":"managed"}"#.utf8).write(to: mismatchedOwnerURL)
+        let mismatchedOwnerStore = CodexDesktopAuthStore(
+            fileManager: .default,
+            systemHomeURL: systemHomeURL,
+            defaultSnapshotURL: mismatchedDefaultURL,
+            ownerStateURL: mismatchedOwnerURL
+        )
+        try mismatchedOwnerStore.reconcileSystemAuth(among: [managedProfile])
+        try expect(
+            !FileManager.default.fileExists(atPath: mismatchedDefaultURL.path),
+            "mismatched borrowed owner should not relabel system auth as default"
+        )
+        let shouldSyncMismatchedBorrowedDefault = try mismatchedOwnerStore.shouldSyncDefaultSnapshotFromSystemAuth(among: [managedProfile])
+        try expect(!shouldSyncMismatchedBorrowedDefault, "mismatched borrowed owner should block default snapshot sync")
+
+        try Data("{not-json".utf8).write(to: borrowedOwnerURL)
+        try borrowedStore.reconcileSystemAuth(among: [managedProfile])
+        try expect(
+            !FileManager.default.fileExists(atPath: borrowedDefaultURL.path),
+            "corrupt owner state should not relabel system auth as default"
+        )
+        let shouldSyncCorruptBorrowedDefault = try borrowedStore.shouldSyncDefaultSnapshotFromSystemAuth(among: [managedProfile])
+        try expect(!shouldSyncCorruptBorrowedDefault, "corrupt owner state should block default snapshot sync")
+        let quarantinedOwnerFiles = try FileManager.default.contentsOfDirectory(
+            at: borrowedOwnerURL.deletingLastPathComponent(),
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix("borrowed-owner.json.bad-") }
+        try expect(!quarantinedOwnerFiles.isEmpty, "corrupt owner state should be quarantined")
     }
 
     private func testWorkspaceStateSanitization() throws {
@@ -270,6 +410,7 @@ struct SelfTestRunner {
         let authURL = tempDirectory.appendingPathComponent("auth.json")
         let payload = """
         {
+          "sub": "acct_123",
           "email": "renew@example.com",
           "https://api.openai.com/auth": {
             "chatgpt_plan_type": "plus",
@@ -291,6 +432,7 @@ struct SelfTestRunner {
         let snapshot = try unwrap(source.loadAccountSnapshot(), "auth snapshot missing")
 
         try expect(snapshot.email == "renew@example.com", "auth email mismatch")
+        try expect(snapshot.accountID == "acct_123", "auth subject mismatch")
         try expect(snapshot.planType == .plus, "auth plan mismatch")
         try expect(
             snapshot.renewsAt == Formatters.parseISO8601("2026-04-19T09:33:13+00:00"),
@@ -323,7 +465,9 @@ struct SelfTestRunner {
         try FileManager.default.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
 
         let logURL = sessionDirectory.appendingPathComponent("rollout.jsonl")
+        let partialLinePrefix = String(repeating: "x", count: 210_000)
         let log = """
+        \(partialLinePrefix)
         {"timestamp":"2026-03-08T20:03:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.0,"window_minutes":300,"resets_at":1773017651},"secondary":{"used_percent":24.0,"window_minutes":10080,"resets_at":1773533321}}}}
         """
         try Data(log.utf8).write(to: logURL)
@@ -348,6 +492,8 @@ struct SelfTestRunner {
     private func testRepositoryPrecedence() async throws {
         let live = StubLiveSource(result: .success(sampleSnapshot(source: .live, stale: false, email: "live@example.com")))
         let session = StubSessionSource(snapshot: sampleSnapshot(source: .sessionLog, stale: true, email: nil))
+        let oldDate = Date(timeIntervalSince1970: 1_800_000_000)
+        let newDate = oldDate.addingTimeInterval(60)
         let repository = UsageRepository(
             liveSource: live,
             sessionLogSource: session,
@@ -361,8 +507,12 @@ struct SelfTestRunner {
 
         let fallbackRepository = UsageRepository(
             liveSource: StubLiveSource(result: .failure(CodexUsageError.processFailed("boom"))),
-            sessionLogSource: session,
-            cacheStore: InMemoryStore(snapshot: sampleSnapshot(source: .cache, stale: true, email: "cache@example.com")),
+            sessionLogSource: StubSessionSource(
+                snapshot: sampleSnapshot(source: .sessionLog, stale: true, email: nil, lastUpdatedAt: newDate)
+            ),
+            cacheStore: InMemoryStore(
+                snapshot: sampleSnapshot(source: .cache, stale: true, email: "cache@example.com", lastUpdatedAt: oldDate)
+            ),
             accountInfoSource: StubAccountInfoSource(
                 snapshot: CodexAccountSnapshot(
                     email: "auth@example.com",
@@ -379,6 +529,41 @@ struct SelfTestRunner {
             fallbackSnapshot.account.renewsAt == Formatters.parseISO8601("2026-04-19T09:33:13+00:00"),
             "fallback renewal enrichment failed"
         )
+
+        let fresherLiveCacheRepository = UsageRepository(
+            liveSource: StubLiveSource(result: .failure(CodexUsageError.processFailed("boom"))),
+            sessionLogSource: StubSessionSource(
+                snapshot: sampleSnapshot(source: .sessionLog, stale: true, email: nil, lastUpdatedAt: oldDate)
+            ),
+            cacheStore: InMemoryStore(
+                snapshot: sampleSnapshot(source: .live, stale: false, email: "cache@example.com", lastUpdatedAt: newDate)
+            ),
+            accountInfoSource: StubAccountInfoSource(snapshot: nil)
+        )
+        let fresherLiveCacheSnapshot = try await fresherLiveCacheRepository.refresh()
+        try expect(fresherLiveCacheSnapshot.source == .cache, "newer live cache should beat older session fallback")
+
+        let noSessionFallbackRepository = UsageRepository(
+            liveSource: StubLiveSource(result: .failure(CodexUsageError.processFailed("boom"))),
+            sessionLogSource: StubSessionSource(snapshot: nil),
+            cacheStore: InMemoryStore(
+                snapshot: sampleSnapshot(source: .live, stale: false, email: "cache@example.com", lastUpdatedAt: newDate)
+            ),
+            accountInfoSource: StubAccountInfoSource(snapshot: nil)
+        )
+        let noSessionFallbackSnapshot = try await noSessionFallbackRepository.refresh()
+        try expect(noSessionFallbackSnapshot.source == .cache, "missing session fallback must not relabel cache as session log")
+
+        let throwingSessionFallbackRepository = UsageRepository(
+            liveSource: StubLiveSource(result: .failure(CodexUsageError.processFailed("boom"))),
+            sessionLogSource: ThrowingSessionSource(),
+            cacheStore: InMemoryStore(
+                snapshot: sampleSnapshot(source: .live, stale: false, email: "cache@example.com", lastUpdatedAt: newDate)
+            ),
+            accountInfoSource: StubAccountInfoSource(snapshot: nil)
+        )
+        let throwingSessionFallbackSnapshot = try await throwingSessionFallbackRepository.refresh()
+        try expect(throwingSessionFallbackSnapshot.source == .cache, "thrown session fallback should still return cache")
 
         let authOnlyFallbackRepository = UsageRepository(
             liveSource: StubLiveSource(result: .failure(CodexUsageError.processFailed("boom"))),
@@ -452,6 +637,7 @@ struct SelfTestRunner {
               printf '%s\n' '{"id":1,"result":{"userAgent":"mock"}}'
               ;;
             *'"id":2'*)
+              printf '%s\n' 'not-json'
               printf '%s\n' '{"id":2,"result":{"account":{"type":"chatgpt","email":"mock@example.com","planType":"plus"},"requiresOpenaiAuth":true}}'
               ;;
             *'"id":3'*)
@@ -524,13 +710,18 @@ struct SelfTestRunner {
         throw CodexUsageError.invalidResponse("Codex app launch test timed out")
     }
 
-    private func sampleSnapshot(source: SnapshotSource, stale: Bool, email: String?) -> CodexUsageSnapshot {
+    private func sampleSnapshot(
+        source: SnapshotSource,
+        stale: Bool,
+        email: String?,
+        lastUpdatedAt: Date = Date()
+    ) -> CodexUsageSnapshot {
         CodexUsageSnapshot(
             account: CodexAccountSnapshot(email: email, authMode: .chatgpt, planType: .plus),
             primary: RateLimitWindowSnapshot(usedPercent: 10, windowDurationMins: 300, resetsAt: Date()),
             secondary: RateLimitWindowSnapshot(usedPercent: 20, windowDurationMins: 10080, resetsAt: Date()),
             source: source,
-            lastUpdatedAt: Date(),
+            lastUpdatedAt: lastUpdatedAt,
             isStale: stale
         )
     }
@@ -605,6 +796,12 @@ private final class StubSessionSource: SessionLogUsageSource, @unchecked Sendabl
 
     func latestSnapshot() throws -> CodexUsageSnapshot? {
         snapshot
+    }
+}
+
+private struct ThrowingSessionSource: SessionLogUsageSource {
+    func latestSnapshot() throws -> CodexUsageSnapshot? {
+        throw CodexUsageError.processFailed("session read failed")
     }
 }
 

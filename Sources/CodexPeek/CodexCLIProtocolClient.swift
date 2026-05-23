@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 final class CodexCLIProtocolClient: CodexUsageLiveSource, @unchecked Sendable {
@@ -9,7 +10,7 @@ final class CodexCLIProtocolClient: CodexUsageLiveSource, @unchecked Sendable {
     init(
         executableLocator: CodexExecutableLocating = DefaultCodexExecutableLocator(),
         arguments: [String] = ["app-server", "--listen", "stdio://"],
-        timeout: TimeInterval = 6.0,
+        timeout: TimeInterval = 8.0,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.executableLocator = executableLocator
@@ -48,6 +49,15 @@ final class CodexCLIProtocolClient: CodexUsageLiveSource, @unchecked Sendable {
         let stderrBox = LockedDataBox()
         let readGroup = DispatchGroup()
 
+        try process.run()
+        let writer = stdinPipe.fileHandleForWriting
+        var didCleanUp = false
+        defer {
+            if !didCleanUp {
+                cleanup(process: process, writer: writer, readGroup: readGroup)
+            }
+        }
+
         readGroup.enter()
         DispatchQueue.global(qos: .utility).async {
             let handle = stdoutPipe.fileHandleForReading
@@ -80,9 +90,6 @@ final class CodexCLIProtocolClient: CodexUsageLiveSource, @unchecked Sendable {
             readGroup.leave()
         }
 
-        try process.run()
-
-        let writer = stdinPipe.fileHandleForWriting
         try send(data: AppServerRequestBuilder.initializeData(), to: writer)
         _ = try collector.waitForEnvelope(
             id: 1,
@@ -105,10 +112,12 @@ final class CodexCLIProtocolClient: CodexUsageLiveSource, @unchecked Sendable {
             timeout: timeout
         )
 
-        writer.closeFile()
-        process.terminate()
-        _ = readGroup.wait(timeout: .now() + timeout)
-        process.waitUntilExit()
+        cleanup(process: process, writer: writer, readGroup: readGroup)
+        didCleanUp = true
+
+        if process.isRunning {
+            throw CodexUsageError.processFailed("Codex app-server did not exit cleanly")
+        }
 
         if process.terminationStatus != 0 {
             let stderrText = String(data: stderrBox.get(), encoding: .utf8)?
@@ -119,10 +128,16 @@ final class CodexCLIProtocolClient: CodexUsageLiveSource, @unchecked Sendable {
         }
 
         guard let accountResult = accountEnvelope.result else {
+            if let error = accountEnvelope.error {
+                throw CodexUsageError.processFailed(error.message)
+            }
             throw CodexUsageError.invalidResponse("account/read returned no result")
         }
 
         guard let rateLimitsResult = rateLimitsEnvelope.result else {
+            if let error = rateLimitsEnvelope.error {
+                throw CodexUsageError.processFailed(error.message)
+            }
             throw CodexUsageError.invalidResponse("account/rateLimits/read returned no result")
         }
 
@@ -142,6 +157,29 @@ final class CodexCLIProtocolClient: CodexUsageLiveSource, @unchecked Sendable {
 
     private func send(data: Data, to handle: FileHandle) throws {
         try handle.write(contentsOf: data)
+    }
+
+    private func cleanup(process: Process, writer: FileHandle, readGroup: DispatchGroup) {
+        try? writer.close()
+
+        if process.isRunning {
+            process.terminate()
+        }
+
+        if !waitForExit(process, timeout: 1), process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+            _ = waitForExit(process, timeout: 1)
+        }
+
+        _ = readGroup.wait(timeout: .now() + 1)
+    }
+
+    private func waitForExit(_ process: Process, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return !process.isRunning
     }
 
     private func mergedEnvironment(executableURL: URL) -> [String: String] {
@@ -176,9 +214,12 @@ final class CodexCLIProtocolClient: CodexUsageLiveSource, @unchecked Sendable {
         case .chatgpt(let email, let planType):
             return CodexAccountSnapshot(
                 email: email,
+                accountID: nil,
                 authMode: .chatgpt,
                 planType: planType
             )
+        case .unknown:
+            return .empty
         }
     }
 
@@ -263,9 +304,17 @@ private final class ResponseCollector: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        for (index, line) in lines.enumerated() {
-            let identifier = try AppServerLineParser.decodeIdentifier(from: line)
-            guard identifier.id == id else {
+        var index = lines.startIndex
+        while index < lines.endIndex {
+            let line = lines[index]
+            guard let identifier = try? AppServerLineParser.decodeIdentifier(from: line),
+                  let lineID = identifier.id else {
+                lines.remove(at: index)
+                continue
+            }
+
+            guard lineID == id else {
+                index += 1
                 continue
             }
 

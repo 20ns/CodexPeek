@@ -135,8 +135,16 @@ final class AccountProfileStore: @unchecked Sendable {
             return state
         }
 
-        let data = try Data(contentsOf: stateURL)
-        let state = try decoder.decode(AccountProfilesState.self, from: data)
+        let state: AccountProfilesState
+        do {
+            let data = try Data(contentsOf: stateURL)
+            state = try decoder.decode(AccountProfilesState.self, from: data)
+        } catch {
+            try quarantineCorruptState()
+            let state = normalized(bootstrapState())
+            try saveState(state)
+            return state
+        }
         let normalizedState = normalized(state)
         if normalizedState != state {
             try saveState(normalizedState)
@@ -158,9 +166,9 @@ final class AccountProfileStore: @unchecked Sendable {
     func createManagedProfile(name: String? = nil, activate: Bool) throws -> AccountProfilesState {
         var state = try loadState()
         let profileID = UUID().uuidString.lowercased()
-        let profileRootURL = managedProfilesRootURL.appendingPathComponent(profileID, isDirectory: true)
+        let profileRootURL = managedProfileHomeURL(profileID: profileID)
 
-        try fileManager.createDirectory(at: profileRootURL, withIntermediateDirectories: true)
+        try createPrivateDirectory(at: profileRootURL)
 
         let profile = AccountProfile(
             id: profileID,
@@ -205,27 +213,43 @@ final class AccountProfileStore: @unchecked Sendable {
             throw CodexUsageError.invalidResponse("default account cannot be removed")
         }
 
+        let profileHomeURL = profile.homeURL.standardizedFileURL
+        let managedRootPath = managedProfilesRootURL.standardizedFileURL.path
+        guard profileHomeURL.path.hasPrefix(managedRootPath + "/") else {
+            throw CodexUsageError.invalidResponse("managed profile path is outside CodexPeek storage")
+        }
+
+        let tombstoneURL = managedProfilesRootURL
+            .appendingPathComponent(".deleted-\(profile.id)-\(Int(Date().timeIntervalSince1970))", isDirectory: true)
+        var movedProfileURL: URL?
+        if fileManager.fileExists(atPath: profileHomeURL.path) {
+            try fileManager.moveItem(at: profileHomeURL, to: tombstoneURL)
+            movedProfileURL = tombstoneURL
+        }
+
         state.profiles.remove(at: index)
         if state.activeProfileID == profileID {
             state.activeProfileID = Self.defaultProfileID
         }
 
-        try saveState(state)
-        if fileManager.fileExists(atPath: profile.homeURL.path) {
-            try fileManager.removeItem(at: profile.homeURL)
+        do {
+            try saveState(state)
+        } catch {
+            if let movedProfileURL {
+                try? fileManager.moveItem(at: movedProfileURL, to: profileHomeURL)
+            }
+            throw error
+        }
+
+        if let movedProfileURL, fileManager.fileExists(atPath: movedProfileURL.path) {
+            try fileManager.removeItem(at: movedProfileURL)
         }
         return try loadState()
     }
 
     private func saveState(_ state: AccountProfilesState) throws {
-        try fileManager.createDirectory(
-            at: stateURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try fileManager.createDirectory(
-            at: managedProfilesRootURL,
-            withIntermediateDirectories: true
-        )
+        try createPrivateDirectory(at: stateURL.deletingLastPathComponent())
+        try createPrivateDirectory(at: managedProfilesRootURL)
 
         let data = try encoder.encode(state)
         try data.write(to: stateURL, options: .atomic)
@@ -239,7 +263,7 @@ final class AccountProfileStore: @unchecked Sendable {
     }
 
     private func normalized(_ state: AccountProfilesState) -> AccountProfilesState {
-        var profiles = state.profiles
+        var profiles = state.profiles.compactMap(normalizedProfile)
         if let defaultIndex = profiles.firstIndex(where: { $0.id == Self.defaultProfileID }) {
             profiles[defaultIndex] = Self.defaultProfile()
         } else {
@@ -267,6 +291,50 @@ final class AccountProfileStore: @unchecked Sendable {
             profiles: sortedProfiles,
             activeProfileID: activeProfileID
         )
+    }
+
+    private func normalizedProfile(_ profile: AccountProfile) -> AccountProfile? {
+        guard profile.kind == .managed else {
+            return profile.id == Self.defaultProfileID ? Self.defaultProfile() : nil
+        }
+
+        guard isSafeManagedProfileID(profile.id) else {
+            return nil
+        }
+
+        var normalized = profile
+        normalized.homePath = managedProfileHomeURL(profileID: profile.id).path
+        return normalized
+    }
+
+    private func managedProfileHomeURL(profileID: String) -> URL {
+        managedProfilesRootURL.appendingPathComponent(profileID, isDirectory: true)
+    }
+
+    private func isSafeManagedProfileID(_ profileID: String) -> Bool {
+        !profileID.isEmpty && profileID.allSatisfy { character in
+            character.isLetter || character.isNumber || character == "-"
+        }
+    }
+
+    private func createPrivateDirectory(at url: URL) throws {
+        try fileManager.createDirectory(
+            at: url,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+    }
+
+    private func quarantineCorruptState() throws {
+        guard fileManager.fileExists(atPath: stateURL.path) else {
+            return
+        }
+
+        let quarantineURL = stateURL.deletingLastPathComponent()
+            .appendingPathComponent("\(stateURL.lastPathComponent).bad-\(Int(Date().timeIntervalSince1970))")
+        try? fileManager.removeItem(at: quarantineURL)
+        try fileManager.moveItem(at: stateURL, to: quarantineURL)
     }
 
     static func defaultProfile() -> AccountProfile {

@@ -20,7 +20,7 @@ final class DefaultCodexExecutableLocator: CodexExecutableLocating, @unchecked S
             }
         }
 
-        let searchPaths = Set(pathComponents() + [
+        let searchPaths = orderedUnique(pathComponents() + [
             "/opt/homebrew/bin",
             "/usr/local/bin",
             "/usr/bin",
@@ -46,5 +46,16 @@ final class DefaultCodexExecutableLocator: CodexExecutableLocating, @unchecked S
         (environment["PATH"] ?? "")
             .split(separator: ":")
             .map(String.init)
+    }
+
+    private func orderedUnique(_ paths: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+
+        for path in paths where !path.isEmpty && seen.insert(path).inserted {
+            result.append(path)
+        }
+
+        return result
     }
 }

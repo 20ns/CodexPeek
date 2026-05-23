@@ -59,7 +59,10 @@ final class HeaderMenuItemView: NSView {
         subtitleField.font = .systemFont(ofSize: 11)
         subtitleField.textColor = .secondaryLabelColor
         titleField.lineBreakMode = .byTruncatingMiddle
+        subtitleField.lineBreakMode = .byTruncatingTail
+        subtitleField.maximumNumberOfLines = 1
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        subtitleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         configureIconButton(refreshButton, symbolName: "arrow.clockwise", tooltip: "Refresh usage", action: #selector(refreshTapped))
         configureIconButton(copyButton, symbolName: "doc.on.doc", tooltip: "Copy debug info", action: #selector(copyTapped))
@@ -155,6 +158,9 @@ final class UsageMenuItemView: NSView {
         titleField.font = .systemFont(ofSize: 12, weight: .semibold)
         detailField.font = .systemFont(ofSize: 11)
         detailField.textColor = .secondaryLabelColor
+        detailField.lineBreakMode = .byTruncatingTail
+        detailField.maximumNumberOfLines = 1
+        detailField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         progressIndicator.isIndeterminate = false
         progressIndicator.minValue = 0
@@ -329,6 +335,9 @@ final class TokenCostMenuItemView: NSView {
         detailField.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
         modelField.font = .systemFont(ofSize: 11)
         modelField.textColor = .secondaryLabelColor
+        detailField.lineBreakMode = .byTruncatingTail
+        detailField.maximumNumberOfLines = 1
+        detailField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         modelField.lineBreakMode = .byTruncatingTail
         modelField.maximumNumberOfLines = 1
         modelField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -359,6 +368,9 @@ final class StatusMenuItemView: NSView {
         translatesAutoresizingMaskIntoConstraints = false
         labelField.font = .systemFont(ofSize: 11)
         labelField.textColor = .secondaryLabelColor
+        labelField.lineBreakMode = .byTruncatingTail
+        labelField.maximumNumberOfLines = 1
+        labelField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         labelField.translatesAutoresizingMaskIntoConstraints = false
         addSubview(labelField)
 

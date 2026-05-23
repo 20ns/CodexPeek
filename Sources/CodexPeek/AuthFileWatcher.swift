@@ -4,6 +4,7 @@ import Darwin
 final class AuthFileWatcher {
     private var watchedURL: URL?
     private var source: DispatchSourceFileSystemObject?
+    private var pendingNotification: DispatchWorkItem?
     private var fileDescriptor: Int32 = -1
 
     deinit {
@@ -26,7 +27,9 @@ final class AuthFileWatcher {
             queue: queue
         )
 
-        source.setEventHandler(handler: onChange)
+        source.setEventHandler { [weak self] in
+            self?.notifyAfterDebounce(onChange)
+        }
         source.setCancelHandler { [fileDescriptor] in
             close(fileDescriptor)
         }
@@ -35,9 +38,19 @@ final class AuthFileWatcher {
     }
 
     func stop() {
+        pendingNotification?.cancel()
+        pendingNotification = nil
         source?.cancel()
         source = nil
         fileDescriptor = -1
         watchedURL = nil
+    }
+
+    private func notifyAfterDebounce(_ onChange: @escaping @Sendable () -> Void) {
+        pendingNotification?.cancel()
+
+        let workItem = DispatchWorkItem(block: onChange)
+        pendingNotification = workItem
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.75, execute: workItem)
     }
 }

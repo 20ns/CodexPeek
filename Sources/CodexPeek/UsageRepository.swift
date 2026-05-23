@@ -29,10 +29,13 @@ actor UsageRepository {
             try? cacheStore.save(live)
             return live
         } catch {
-            if let sessionFallback = merge(snapshot: try sessionLogSource.latestSnapshot(), fallback: cached, authFallback: authAccount)?
+            let sessionSnapshot = try? sessionLogSource.latestSnapshot()
+            if let sessionFallback = merge(snapshot: sessionSnapshot, fallback: cached, authFallback: authAccount)?
                 .withSource(.sessionLog, stale: true) {
-                try? cacheStore.save(sessionFallback)
-                return sessionFallback
+                if shouldUse(sessionFallback: sessionFallback, over: cached) {
+                    try? cacheStore.save(sessionFallback)
+                    return sessionFallback
+                }
             }
 
             if let cached {
@@ -53,7 +56,7 @@ actor UsageRepository {
         authFallback: CodexAccountSnapshot?
     ) -> CodexUsageSnapshot? {
         guard var snapshot else {
-            return fallback
+            return nil
         }
 
         if snapshot.account.email == nil {
@@ -73,5 +76,17 @@ actor UsageRepository {
         }
 
         return snapshot
+    }
+
+    private func shouldUse(sessionFallback: CodexUsageSnapshot, over cached: CodexUsageSnapshot?) -> Bool {
+        guard let cached else {
+            return true
+        }
+
+        if cached.source == .live, sessionFallback.lastUpdatedAt < cached.lastUpdatedAt {
+            return false
+        }
+
+        return sessionFallback.lastUpdatedAt >= cached.lastUpdatedAt
     }
 }

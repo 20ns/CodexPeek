@@ -1,6 +1,8 @@
 import Foundation
 
 final class CodexSessionLogUsageSource: SessionLogUsageSource, @unchecked Sendable {
+    private static let maxFallbackCandidates = 30
+
     private let sessionsRootURL: URL
     private let fileManager: FileManager
 
@@ -38,6 +40,10 @@ final class CodexSessionLogUsageSource: SessionLogUsageSource, @unchecked Sendab
         for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" {
             let modifiedAt = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date.distantPast
             files.append((fileURL, modifiedAt))
+            if files.count > Self.maxFallbackCandidates {
+                files.sort { lhs, rhs in lhs.modifiedAt > rhs.modifiedAt }
+                files.removeLast(files.count - Self.maxFallbackCandidates)
+            }
         }
 
         return files
@@ -46,13 +52,15 @@ final class CodexSessionLogUsageSource: SessionLogUsageSource, @unchecked Sendab
     }
 
     private func snapshot(from fileURL: URL) throws -> CodexUsageSnapshot? {
-        let data = try readTail(of: fileURL, maxBytes: 200_000)
-        guard let text = String(data: data, encoding: .utf8) else {
-            return nil
+        let tail = try readTail(of: fileURL, maxBytes: 200_000)
+        let text = String(decoding: tail.data, as: UTF8.self)
+        var lines = text.split(whereSeparator: \.isNewline)
+        if tail.startedMidFile, !lines.isEmpty {
+            lines.removeFirst()
         }
 
         let decoder = JSONDecoder()
-        for line in text.split(whereSeparator: \.isNewline).reversed() {
+        for line in lines.reversed() {
             guard line.contains("\"token_count\""), line.contains("\"rate_limits\"") else {
                 continue
             }
@@ -82,14 +90,14 @@ final class CodexSessionLogUsageSource: SessionLogUsageSource, @unchecked Sendab
         return nil
     }
 
-    private func readTail(of fileURL: URL, maxBytes: Int) throws -> Data {
+    private func readTail(of fileURL: URL, maxBytes: Int) throws -> (data: Data, startedMidFile: Bool) {
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
 
         let fileSize = try handle.seekToEnd()
         let offset = max(0, Int64(fileSize) - Int64(maxBytes))
         try handle.seek(toOffset: UInt64(offset))
-        return try handle.readToEnd() ?? Data()
+        return (try handle.readToEnd() ?? Data(), offset > 0)
     }
 
     private func timestamp(from value: String?) -> Date? {
@@ -107,7 +115,7 @@ final class CodexSessionLogUsageSource: SessionLogUsageSource, @unchecked Sendab
 
     private func mapWindow(_ payload: SessionRateLimitWindow) -> RateLimitWindowSnapshot {
         RateLimitWindowSnapshot(
-            usedPercent: Int(payload.usedPercent.rounded()),
+            usedPercent: max(0, min(100, Int(payload.usedPercent.rounded()))),
             windowDurationMins: payload.windowMinutes,
             resetsAt: payload.resetsAt.map { Date(timeIntervalSince1970: $0) }
         )

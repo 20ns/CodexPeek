@@ -37,6 +37,7 @@ final class AuthJSONAccountInfoSource: AccountInfoSource, @unchecked Sendable {
 
         return CodexAccountSnapshot(
             email: email,
+            accountID: tokenPayload?.subject,
             authMode: authMode,
             planType: planType,
             renewsAt: renewsAt
@@ -82,10 +83,12 @@ private struct AuthJSONTokens: Decodable {
 }
 
 private struct AuthJWTPayload: Decodable {
+    let subject: String?
     let email: String?
     let openAI: OpenAIAuthPayload?
 
     private enum CodingKeys: String, CodingKey {
+        case subject = "sub"
         case email
         case openAI = "https://api.openai.com/auth"
     }

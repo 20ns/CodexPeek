@@ -8,6 +8,8 @@ APP_PATH="$ROOT_DIR/.build/${APP_NAME}.app"
 
 mkdir -p "$DIST_DIR"
 
+cd "$ROOT_DIR"
+swift run CodexPeek --self-test
 "$ROOT_DIR/Scripts/build_app.sh"
 
 rm -f "$DIST_DIR/${APP_NAME}.zip"

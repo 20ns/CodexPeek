@@ -17,16 +17,68 @@ struct AppServerRateLimitWindow: Decodable, Equatable {
     let usedPercent: Int
     let windowDurationMins: Int?
     let resetsAt: Int64?
+
+    private enum CodingKeys: String, CodingKey {
+        case usedPercent
+        case windowDurationMins
+        case resetsAt
+    }
+
+    init(usedPercent: Int, windowDurationMins: Int?, resetsAt: Int64?) {
+        self.usedPercent = usedPercent
+        self.windowDurationMins = windowDurationMins
+        self.resetsAt = resetsAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        usedPercent = try Self.decodePercent(from: container, forKey: .usedPercent)
+        windowDurationMins = try container.decodeIfPresent(Int.self, forKey: .windowDurationMins)
+        resetsAt = try container.decodeIfPresent(Int64.self, forKey: .resetsAt)
+    }
+
+    private static func decodePercent(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys
+    ) throws -> Int {
+        if let value = try? container.decode(Int.self, forKey: key) {
+            return clampedPercent(value)
+        }
+
+        let value = try container.decode(Double.self, forKey: key)
+        return clampedPercent(Int(value.rounded()))
+    }
+
+    private static func clampedPercent(_ value: Int) -> Int {
+        max(0, min(100, value))
+    }
 }
 
 struct AppServerAccountReadResponse: Decodable {
     let account: AppServerAccount?
     let requiresOpenaiAuth: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case account
+        case requiresOpenaiAuth
+    }
+
+    init(account: AppServerAccount?, requiresOpenaiAuth: Bool) {
+        self.account = account
+        self.requiresOpenaiAuth = requiresOpenaiAuth
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        account = try container.decodeIfPresent(AppServerAccount.self, forKey: .account)
+        requiresOpenaiAuth = try container.decodeIfPresent(Bool.self, forKey: .requiresOpenaiAuth) ?? false
+    }
 }
 
 enum AppServerAccount: Decodable, Equatable {
     case apiKey
     case chatgpt(email: String, planType: CodexPlanType)
+    case unknown
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -34,23 +86,22 @@ enum AppServerAccount: Decodable, Equatable {
         case planType
     }
 
-    private enum Kind: String, Decodable {
-        case apiKey
-        case chatgpt
-    }
-
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let type = try container.decode(Kind.self, forKey: .type)
+        let type = try container.decode(String.self, forKey: .type)
 
         switch type {
-        case .apiKey:
+        case "apiKey":
             self = .apiKey
-        case .chatgpt:
-            self = .chatgpt(
-                email: try container.decode(String.self, forKey: .email),
-                planType: try container.decode(CodexPlanType.self, forKey: .planType)
-            )
+        case "chatgpt":
+            guard let email = try container.decodeIfPresent(String.self, forKey: .email) else {
+                self = .unknown
+                return
+            }
+            let planType = try container.decodeIfPresent(CodexPlanType.self, forKey: .planType) ?? .unknown
+            self = .chatgpt(email: email, planType: planType)
+        default:
+            self = .unknown
         }
     }
 }
@@ -162,6 +213,7 @@ private struct AccountReadRequest: Encodable {
 private struct AccountRateLimitsReadRequest: Encodable {
     let method = "account/rateLimits/read"
     let id = 3
+    let params = EmptyObject()
 }
 
 private struct EmptyObject: Encodable {}

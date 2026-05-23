@@ -11,6 +11,13 @@ RESOURCES_DIR="$CONTENTS_DIR/Resources"
 ICONSET_DIR="$ROOT_DIR/.build/AppIcon.iconset"
 MASTER_ICON_PNG="$ROOT_DIR/.build/AppIcon-1024.png"
 
+for tool in swift qlmanage sips iconutil; do
+  command -v "$tool" >/dev/null || {
+    echo "Missing required tool: $tool" >&2
+    exit 1
+  }
+done
+
 cd "$ROOT_DIR"
 swift build -c release
 
@@ -23,6 +30,10 @@ cp "$ROOT_DIR/AppResources/Info.plist" "$CONTENTS_DIR/Info.plist"
 rm -rf "$ICONSET_DIR" "$MASTER_ICON_PNG"
 mkdir -p "$ICONSET_DIR"
 qlmanage -t -s 1024 -o "$ROOT_DIR/.build" "$ROOT_DIR/AppResources/AppLogo.svg" >/dev/null 2>&1
+if [[ ! -f "$ROOT_DIR/.build/AppLogo.svg.png" ]]; then
+  echo "Failed to generate app icon from AppLogo.svg" >&2
+  exit 1
+fi
 mv "$ROOT_DIR/.build/AppLogo.svg.png" "$MASTER_ICON_PNG"
 
 sips -z 16 16     "$MASTER_ICON_PNG" --out "$ICONSET_DIR/icon_16x16.png" >/dev/null
@@ -37,6 +48,10 @@ sips -z 512 512   "$MASTER_ICON_PNG" --out "$ICONSET_DIR/icon_512x512.png" >/dev
 cp "$MASTER_ICON_PNG" "$ICONSET_DIR/icon_512x512@2x.png"
 
 iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns"
+if [[ ! -f "$RESOURCES_DIR/AppIcon.icns" ]]; then
+  echo "Failed to generate AppIcon.icns" >&2
+  exit 1
+fi
 
 chmod +x "$MACOS_DIR/$APP_NAME"
 

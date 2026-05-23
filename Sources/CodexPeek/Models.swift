@@ -18,6 +18,17 @@ enum CodexPlanType: String, Codable, Equatable {
     case enterprise
     case edu
     case unknown
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        self = CodexPlanType(rawValue: value) ?? .unknown
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 enum SnapshotSource: String, Codable, Equatable {
@@ -34,6 +45,7 @@ enum RefreshState: Equatable {
 
 struct CodexAccountSnapshot: Codable, Equatable {
     var email: String?
+    var accountID: String? = nil
     var authMode: CodexAuthMode
     var planType: CodexPlanType
     var renewsAt: Date? = nil
@@ -199,11 +211,23 @@ extension CodexAccountSnapshot {
     }
 
     func matchesIdentity(of other: CodexAccountSnapshot) -> Bool {
-        isSignedIn
-            && other.isSignedIn
-            && authMode == other.authMode
-            && email == other.email
-            && planType == other.planType
+        guard isSignedIn, other.isSignedIn, authMode == other.authMode else {
+            return false
+        }
+
+        if let accountID, let otherAccountID = other.accountID, !accountID.isEmpty, !otherAccountID.isEmpty {
+            return accountID == otherAccountID
+        }
+
+        guard authMode != .apikey,
+              let email,
+              let otherEmail = other.email,
+              !email.isEmpty,
+              !otherEmail.isEmpty else {
+            return false
+        }
+
+        return email == otherEmail
     }
 
     var displayName: String {

@@ -74,7 +74,6 @@ final class AppController: NSObject, NSMenuDelegate {
         scheduleTokenRefreshTimer()
 
         do {
-            try codexDesktopAuthStore.bootstrapDefaultSnapshotIfNeeded()
             try syncAccountStateFromDisk()
         } catch {
             refreshState = .failed("Failed to load account profiles")
@@ -428,6 +427,7 @@ final class AppController: NSObject, NSMenuDelegate {
         }
 
         lastRefreshStartAt = Date()
+        let profileID = activeProfile.id
         refreshState = .refreshing
         render()
 
@@ -452,6 +452,9 @@ final class AppController: NSObject, NSMenuDelegate {
 
             do {
                 let snapshot = try await repository.refresh()
+                guard self.activeProfile?.id == profileID else {
+                    return
+                }
                 if self.shouldAttemptDuplicateProfileRecovery(for: activeProfile, snapshot: snapshot),
                    let candidate = await self.recoverDuplicateProfile(from: activeProfile) {
                     self.snapshot = nil
@@ -463,6 +466,9 @@ final class AppController: NSObject, NSMenuDelegate {
                 self.refreshState = .idle
                 try self.syncAccountStateFromDisk()
             } catch {
+                guard self.activeProfile?.id == profileID else {
+                    return
+                }
                 if let candidate = await self.recoverDuplicateProfile(from: activeProfile) {
                     self.snapshot = nil
                     self.refreshState = .idle
@@ -699,7 +705,7 @@ final class AppController: NSObject, NSMenuDelegate {
         var removedActiveProfile = false
         for profile in state.profiles where profile.kind == .managed {
             guard pendingLoginProfileID != profile.id,
-                  accountSnapshotsByProfileID[profile.id]?.isSignedIn != true else {
+                  managedProfileIsDefinitelyUnsigned(profile) else {
                 continue
             }
 
@@ -716,6 +722,18 @@ final class AppController: NSObject, NSMenuDelegate {
         if removedActiveProfile, let currentState = accountState, let profile = currentState.activeProfile() {
             snapshot = nil
             configureActiveProfile(profile)
+        }
+    }
+
+    private func managedProfileIsDefinitelyUnsigned(_ profile: AccountProfile) -> Bool {
+        guard FileManager.default.fileExists(atPath: profile.authURL.path) else {
+            return true
+        }
+
+        do {
+            return try AuthJSONAccountInfoSource(authURL: profile.authURL).loadAccountSnapshot()?.isSignedIn != true
+        } catch {
+            return false
         }
     }
 
