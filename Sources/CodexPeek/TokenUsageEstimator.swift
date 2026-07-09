@@ -313,6 +313,9 @@ struct TokenPricingCatalog: Sendable {
     }
 
     static let standard = TokenPricingCatalog(prices: [
+        "gpt-5.6-sol": Price(inputPerMillion: 5, cachedInputPerMillion: 0.5, outputPerMillion: 30, displayName: "GPT-5.6 Sol"),
+        "gpt-5.6-terra": Price(inputPerMillion: 2.5, cachedInputPerMillion: 0.25, outputPerMillion: 15, displayName: "GPT-5.6 Terra"),
+        "gpt-5.6-luna": Price(inputPerMillion: 1, cachedInputPerMillion: 0.1, outputPerMillion: 6, displayName: "GPT-5.6 Luna"),
         "gpt-5.5": Price(inputPerMillion: 5, cachedInputPerMillion: 0.5, outputPerMillion: 30, displayName: "GPT-5.5"),
         "gpt-5.5-pro": Price(inputPerMillion: 30, cachedInputPerMillion: 30, outputPerMillion: 180, displayName: "GPT-5.5 Pro"),
         "gpt-5.4": Price(inputPerMillion: 2.5, cachedInputPerMillion: 0.25, outputPerMillion: 15, displayName: "GPT-5.4"),

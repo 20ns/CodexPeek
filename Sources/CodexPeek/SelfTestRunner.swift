@@ -9,6 +9,8 @@ struct SelfTestRunner {
         try testWorkspaceStateSanitization()
         try testTranscriptParser()
         try testRateLimitSelectorFallback()
+        try testFutureCodexRateLimitSelector()
+        try testCurrentModelPricing()
         try testSessionLogFallback()
         try testProfileScopedCachePaths()
         try await testRepositoryPrecedence()
@@ -39,6 +41,27 @@ struct SelfTestRunner {
         try expect(selected.secondary?.usedPercent == 100, "secondary percent should clamp")
         try expect(selected.planType == .unknown, "unknown plan should decode as unknown")
         try expect(spark?.limitId == "codex_bengalfox", "selector did not choose spark bucket")
+    }
+
+    private func testFutureCodexRateLimitSelector() throws {
+        let response = AppServerRateLimitsResponse(
+            rateLimits: AppServerRateLimitSnapshot(limitId: "fallback", limitName: nil, primary: nil, secondary: nil, planType: nil),
+            rateLimitsByLimitId: [
+                "gpt-5.6": AppServerRateLimitSnapshot(limitId: "gpt-5.6", limitName: "GPT-5.6 Sol Codex", primary: nil, secondary: nil, planType: nil)
+            ]
+        )
+
+        try expect(
+            AppServerRateLimitSelector.selectCodexSnapshot(from: response).limitId == "gpt-5.6",
+            "future Codex bucket should be selected"
+        )
+    }
+
+    private func testCurrentModelPricing() throws {
+        let usage = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 1_000_000, reasoningOutputTokens: 0, totalTokens: 2_000_000)
+        let cost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-sol", usage: usage), "GPT-5.6 Sol pricing missing")
+        try expect(cost.total == 35, "GPT-5.6 Sol pricing mismatch")
+        try expect(TokenPricingCatalog.standard.displayModelName(for: "gpt-5.6-terra-2026") == "GPT-5.6 Terra", "GPT-5.6 Terra prefix pricing missing")
     }
 
     private func testAccountProfileStore() throws {

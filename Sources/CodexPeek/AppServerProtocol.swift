@@ -136,7 +136,19 @@ enum AppServerLineParser {
 
 enum AppServerRateLimitSelector {
     static func selectCodexSnapshot(from response: AppServerRateLimitsResponse) -> AppServerRateLimitSnapshot {
-        response.rateLimitsByLimitId?["codex"] ?? response.rateLimits
+        guard let buckets = response.rateLimitsByLimitId else {
+            return response.rateLimits
+        }
+
+        if let codex = buckets["codex"] {
+            return codex
+        }
+
+        return buckets.values.first { snapshot in
+            let limitName = snapshot.limitName?.localizedLowercase ?? ""
+            let limitID = snapshot.limitId?.localizedLowercase ?? ""
+            return limitName.contains("codex") || limitID.contains("codex")
+        } ?? response.rateLimits
     }
 
     static func selectSparkSnapshot(from response: AppServerRateLimitsResponse) -> AppServerRateLimitSnapshot? {

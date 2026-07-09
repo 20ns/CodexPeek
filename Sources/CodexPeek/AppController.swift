@@ -47,6 +47,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private var tokenRefreshTimer: Timer?
     private var refreshTask: Task<Void, Never>?
     private var tokenReportTask: Task<Void, Never>?
+    private var tokenReportGeneration = 0
     private var snapshot: CodexUsageSnapshot?
     private var tokenReport: TokenUsageReport?
     private var refreshState: RefreshState = .idle
@@ -752,6 +753,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func configureActiveProfile(_ profile: AccountProfile) {
+        tokenReportGeneration += 1
         tokenReportTask?.cancel()
         tokenReportTask = nil
         activeProfile = profile
@@ -813,10 +815,17 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func refreshTokenReportIfNeeded(force: Bool, delay: TimeInterval) {
-        guard tokenReportTask == nil,
-              let tokenUsageSource,
+        guard let tokenUsageSource,
               let tokenReportStore,
               let activeProfile else {
+            return
+        }
+
+        if force {
+            tokenReportGeneration += 1
+            tokenReportTask?.cancel()
+            tokenReportTask = nil
+        } else if tokenReportTask != nil {
             return
         }
 
@@ -827,15 +836,17 @@ final class AppController: NSObject, NSMenuDelegate {
         }
 
         let profileID = activeProfile.id
+        let generation = tokenReportGeneration
 
-        tokenReportTask = Task.detached(priority: .utility) { [weak self, profileID, tokenUsageSource, tokenReportStore] in
+        tokenReportTask = Task.detached(priority: .utility) { [weak self, profileID, generation, tokenUsageSource, tokenReportStore] in
             if delay > 0 {
                 try? await Task.sleep(for: .seconds(delay))
             }
 
             guard !Task.isCancelled else {
                 await MainActor.run {
-                    guard self?.activeProfile?.id == profileID else {
+                    guard self?.activeProfile?.id == profileID,
+                          self?.tokenReportGeneration == generation else {
                         return
                     }
                     self?.tokenReportTask = nil
@@ -847,7 +858,8 @@ final class AppController: NSObject, NSMenuDelegate {
                 let report = try tokenUsageSource.usageReport()
                 try tokenReportStore.save(report)
                 await MainActor.run {
-                    guard self?.activeProfile?.id == profileID else {
+                    guard self?.activeProfile?.id == profileID,
+                          self?.tokenReportGeneration == generation else {
                         return
                     }
                     self?.tokenReport = report
@@ -856,7 +868,8 @@ final class AppController: NSObject, NSMenuDelegate {
                 }
             } catch {
                 await MainActor.run {
-                    guard self?.activeProfile?.id == profileID else {
+                    guard self?.activeProfile?.id == profileID,
+                          self?.tokenReportGeneration == generation else {
                         return
                     }
                     self?.tokenReportTask = nil
