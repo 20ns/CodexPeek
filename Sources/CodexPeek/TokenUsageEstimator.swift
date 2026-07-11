@@ -44,6 +44,7 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         var weeklyTotalsByModel: [String: Int] = [:]
         var monthlyTotalsByModel: [String: Int] = [:]
         var allTimeTotalsByModel: [String: Int] = [:]
+        var allBuckets: [TokenUsageBucket] = []
 
         for file in files {
             let session: SessionUsage?
@@ -60,21 +61,17 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
                 continue
             }
 
-            add(session, to: &report.allTime, totalsByModel: &allTimeTotalsByModel)
-
-            if session.updatedAt >= monthCutoff {
-                add(session, to: &report.month, totalsByModel: &monthlyTotalsByModel)
-            }
-
-            if session.updatedAt >= weekCutoff {
-                add(session, to: &report.week, totalsByModel: &weeklyTotalsByModel)
-            }
+            allBuckets.append(contentsOf: session.buckets)
+            add(session.buckets, since: nil, to: &report.allTime, totalsByModel: &allTimeTotalsByModel)
+            add(session.buckets, since: monthCutoff, to: &report.month, totalsByModel: &monthlyTotalsByModel)
+            add(session.buckets, since: weekCutoff, to: &report.week, totalsByModel: &weeklyTotalsByModel)
         }
 
         report.week.topModel = weeklyTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
         report.month.topModel = monthlyTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
         report.allTime.topModel = allTimeTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
         report.generatedAt = now
+        report.history = TokenUsageHistory(buckets: allBuckets.sorted { $0.startedAt < $1.startedAt })
         try? indexStore?.save(index)
         return report
     }
@@ -103,100 +100,91 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     }
 
     private func add(
-        _ session: SessionUsage,
+        _ buckets: [TokenUsageBucket],
+        since cutoff: Date?,
         to summary: inout TokenUsageSummary,
         totalsByModel: inout [String: Int]
     ) {
-        summary.inputTokens += session.usage.inputTokens
-        summary.cachedInputTokens += session.usage.cachedInputTokens
-        summary.outputTokens += session.usage.outputTokens
-        summary.reasoningOutputTokens += session.usage.reasoningOutputTokens
-        summary.totalTokens += session.usage.totalTokens
-        summary.sessionCount += 1
+        let selected = buckets.filter { cutoff == nil || $0.startedAt >= cutoff! }
+        guard !selected.isEmpty else { return }
+        var priced = false
 
-        guard let model = session.model,
-              let cost = pricingCatalog.estimateCost(for: model, usage: session.usage) else {
-            return
+        for bucket in selected {
+            summary.inputTokens += bucket.usage.inputTokens
+            summary.cachedInputTokens += bucket.usage.cachedInputTokens
+            summary.outputTokens += bucket.usage.outputTokens
+            summary.reasoningOutputTokens += bucket.usage.reasoningOutputTokens
+            summary.totalTokens += bucket.usage.totalTokens
+            totalsByModel[pricingCatalog.displayModelName(for: bucket.model), default: 0] += bucket.usage.totalTokens
+
+            guard let cost = pricingCatalog.estimateCost(for: bucket.model, usage: bucket.usage) else { continue }
+            summary.estimatedCostUSD += cost.total
+            summary.uncachedInputCostUSD += cost.uncachedInput
+            summary.cachedInputCostUSD += cost.cachedInput
+            summary.outputCostUSD += cost.output
+            priced = true
         }
-
-        summary.estimatedCostUSD += cost.total
-        summary.uncachedInputCostUSD += cost.uncachedInput
-        summary.cachedInputCostUSD += cost.cachedInput
-        summary.outputCostUSD += cost.output
-        summary.pricedSessionCount += 1
-        totalsByModel[pricingCatalog.displayModelName(for: model), default: 0] += session.usage.totalTokens
+        summary.sessionCount += 1
+        summary.pricedSessionCount += priced ? 1 : 0
     }
 
     private func sessionUsage(from fileURL: URL) throws -> SessionUsage? {
-        let headData = try readHead(of: fileURL, maxBytes: 2_000_000)
+        let headData = try readHead(of: fileURL, maxBytes: 256_000)
         let tail = try readTail(of: fileURL, maxBytes: 160_000)
-        guard let headText = String(data: headData, encoding: .utf8) else {
-            return nil
-        }
-        let tailText = String(decoding: tail.data, as: UTF8.self)
-        var tailLines = tailText.split(whereSeparator: \.isNewline)
-        if tail.startedMidFile, !tailLines.isEmpty {
-            tailLines.removeFirst()
-        }
+        var tailLines = dataLines(tail.data)
+        if tail.startedMidFile, !tailLines.isEmpty { tailLines.removeFirst() }
 
         let decoder = JSONDecoder()
-        let model = modelName(from: headText, decoder: decoder)
+        let model = modelName(from: headData, decoder: decoder) ?? "Unknown model"
         var latestUsage: TokenUsagePayload?
         var latestTimestamp: Date?
-
         for line in tailLines {
-            guard let entry = try? decoder.decode(TokenUsageLogEntry.self, from: Data(line.utf8)) else {
-                continue
-            }
-
-            guard entry.type == "event_msg",
+            guard line.range(of: Data("\"token_count\"".utf8)) != nil,
+                  let entry = try? decoder.decode(TokenUsageLogEntry.self, from: line),
+                  entry.type == "event_msg",
                   entry.payload?.type == "token_count",
-                  let usage = entry.payload?.info?.totalTokenUsage else {
-                continue
-            }
-
+                  let usage = entry.payload?.info?.totalTokenUsage else { continue }
             latestUsage = usage
             latestTimestamp = entry.timestamp.flatMap(Formatters.parseISO8601)
         }
 
-        guard let latestUsage else {
-            return nil
-        }
-
+        guard let latestUsage else { return nil }
         let modifiedAt = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        return SessionUsage(
-            model: model,
-            usage: latestUsage,
-            updatedAt: latestTimestamp ?? modifiedAt ?? Date.distantPast
-        )
+        let timestamp = latestTimestamp ?? modifiedAt ?? .distantPast
+        let interval = Date(timeIntervalSince1970: floor(timestamp.timeIntervalSince1970 / 900) * 900)
+        return SessionUsage(buckets: [TokenUsageBucket(startedAt: interval, model: model, usage: latestUsage)])
     }
 
-    private func modelName(from text: String, decoder: JSONDecoder) -> String? {
-        for line in text.split(whereSeparator: \.isNewline) {
-            guard let entry = try? decoder.decode(TokenUsageLogEntry.self, from: Data(line.utf8)),
-                  entry.type == "turn_context",
-                  let model = entry.payload?.model,
-                  !model.isEmpty else {
-                continue
-            }
+    private func modelName(from data: Data, decoder: JSONDecoder) -> String? {
+        guard let marker = data.range(of: Data("\"type\":\"turn_context\"".utf8)) else { return nil }
+        let lineStart = data[..<marker.lowerBound].lastIndex(of: 10).map { data.index(after: $0) } ?? data.startIndex
+        let lineEnd = data[marker.upperBound...].firstIndex(of: 10) ?? data.endIndex
+        guard let entry = try? decoder.decode(TokenUsageLogEntry.self, from: data.subdata(in: lineStart..<lineEnd)),
+              let model = entry.payload?.model,
+              !model.isEmpty else { return nil }
+        return model
+    }
 
-            return model
+    private func dataLines(_ data: Data) -> [Data] {
+        var lines: [Data] = []
+        var start = data.startIndex
+        while let end = data[start...].firstIndex(of: 10) {
+            if start < end { lines.append(data.subdata(in: start..<end)) }
+            start = data.index(after: end)
         }
-
-        return nil
+        if start < data.endIndex { lines.append(data.subdata(in: start..<data.endIndex)) }
+        return lines
     }
 
     private func readHead(of fileURL: URL, maxBytes: Int) throws -> Data {
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
-
         return try handle.read(upToCount: maxBytes) ?? Data()
     }
 
     private func readTail(of fileURL: URL, maxBytes: Int) throws -> (data: Data, startedMidFile: Bool) {
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
-
         let fileSize = try handle.seekToEnd()
         let offset = max(0, Int64(fileSize) - Int64(maxBytes))
         try handle.seek(toOffset: UInt64(offset))
@@ -225,11 +213,23 @@ final class TokenUsageSessionIndexStore: TokenUsageSessionIndexStoring, @uncheck
         }
 
         let data = try Data(contentsOf: cacheURL)
-        let index = try decoder.decode(TokenUsageSessionIndex.self, from: data)
-        guard index.schemaVersion == TokenUsageSessionIndex.schemaVersion else {
-            return nil
+        if let index = try? decoder.decode(TokenUsageSessionIndex.self, from: data),
+           index.schemaVersion == TokenUsageSessionIndex.schemaVersion {
+            return index
         }
-        return index
+        guard let legacy = try? decoder.decode(LegacyTokenUsageSessionIndex.self, from: data),
+              legacy.schemaVersion == 1 else { return nil }
+        return TokenUsageSessionIndex(sessions: legacy.sessions.mapValues { item in
+            let bucket = item.session.map {
+                TokenUsageBucket(startedAt: $0.updatedAt, model: $0.model ?? "Unknown model", usage: $0.usage)
+            }
+            return IndexedSessionUsage(
+                path: item.path,
+                size: item.size,
+                modifiedAt: item.modifiedAt,
+                session: bucket.map { SessionUsage(buckets: [$0]) }
+            )
+        })
     }
 
     func save(_ index: TokenUsageSessionIndex) throws {
@@ -369,7 +369,7 @@ struct SessionLogFile {
 }
 
 struct TokenUsageSessionIndex: Codable {
-    static let schemaVersion = 1
+    static let schemaVersion = 2
 
     var schemaVersion = TokenUsageSessionIndex.schemaVersion
     var sessions: [String: IndexedSessionUsage] = [:]
@@ -388,15 +388,38 @@ struct IndexedSessionUsage: Codable {
         self.session = session
     }
 
+    init(path: String, size: Int, modifiedAt: Date, session: SessionUsage?) {
+        self.path = path
+        self.size = size
+        self.modifiedAt = modifiedAt
+        self.session = session
+    }
+
     func matches(_ file: SessionLogFile) -> Bool {
         path == file.path && size == file.size && modifiedAt == file.modifiedAt
     }
 }
 
-struct SessionUsage: Codable {
+private struct LegacyTokenUsageSessionIndex: Decodable {
+    let schemaVersion: Int
+    let sessions: [String: LegacyIndexedSessionUsage]
+}
+
+private struct LegacyIndexedSessionUsage: Decodable {
+    let path: String
+    let size: Int
+    let modifiedAt: Date
+    let session: LegacySessionUsage?
+}
+
+private struct LegacySessionUsage: Decodable {
     let model: String?
     let usage: TokenUsagePayload
     let updatedAt: Date
+}
+
+struct SessionUsage: Codable {
+    let buckets: [TokenUsageBucket]
 }
 
 struct TokenUsagePayload: Codable, Equatable {
@@ -405,6 +428,24 @@ struct TokenUsagePayload: Codable, Equatable {
     let outputTokens: Int
     let reasoningOutputTokens: Int
     let totalTokens: Int
+
+    static let zero = TokenUsagePayload(
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+        totalTokens: 0
+    )
+
+    mutating func add(_ other: TokenUsagePayload) {
+        self = TokenUsagePayload(
+            inputTokens: inputTokens + other.inputTokens,
+            cachedInputTokens: cachedInputTokens + other.cachedInputTokens,
+            outputTokens: outputTokens + other.outputTokens,
+            reasoningOutputTokens: reasoningOutputTokens + other.reasoningOutputTokens,
+            totalTokens: totalTokens + other.totalTokens
+        )
+    }
 
     private enum CodingKeys: String, CodingKey {
         case inputTokens = "input_tokens"

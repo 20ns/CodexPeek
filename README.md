@@ -32,6 +32,8 @@ CodexBar supports a broader feature set, so this is not a blanket "better app" c
 - No Electron, no webview, no Tauri
 - No always-on Codex helper process
 - Reads live usage from the official local `codex app-server` protocol
+- Charts daily and hourly token history by model, entirely on-device
+- Compares today, recent weeks, cache reuse, and API-equivalent value
 - Falls back gracefully to local Codex session data and cache
 - Auto-detects the signed-in Codex account
 - Supports launch at login

@@ -100,6 +100,10 @@ enum UIFormatters {
 
     nonisolated static func compactTokenString(_ value: Int) -> String {
         let absolute = Double(value)
+        if absolute >= 1_000_000_000 {
+            return String(format: "%.1fB", absolute / 1_000_000_000)
+        }
+
         if absolute >= 1_000_000 {
             return String(format: "%.1fM", absolute / 1_000_000)
         }

@@ -135,12 +135,14 @@ struct TokenUsageReport: Codable, Equatable {
     var month: TokenUsageSummary
     var allTime: TokenUsageSummary
     var generatedAt: Date?
+    var history: TokenUsageHistory? = nil
 
     static let empty = TokenUsageReport(
         week: .empty,
         month: .empty,
         allTime: .empty,
-        generatedAt: nil
+        generatedAt: nil,
+        history: nil
     )
 
     var hasUsage: Bool {

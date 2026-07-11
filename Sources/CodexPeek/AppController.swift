@@ -37,6 +37,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private let launchAtLoginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
     private let logoutItem = NSMenuItem(title: "Log Out", action: #selector(logOut), keyEquivalent: "")
     private let openCodexItem = NSMenuItem(title: "Open Codex", action: #selector(openCodex), keyEquivalent: "")
+    private let historyItem = NSMenuItem(title: "Usage History…", action: #selector(openUsageHistory), keyEquivalent: "")
     private let removeAccountItem = NSMenuItem(title: "Remove Current Account…", action: #selector(removeCurrentAccount), keyEquivalent: "")
     private let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
 
@@ -50,6 +51,9 @@ final class AppController: NSObject, NSMenuDelegate {
     private var tokenReportGeneration = 0
     private var snapshot: CodexUsageSnapshot?
     private var tokenReport: TokenUsageReport?
+    private var planHistory = PlanUsageHistory()
+    private var planHistoryStore: PlanUsageHistoryStore?
+    private var usageHistoryWindowController: UsageHistoryWindowController?
     private var refreshState: RefreshState = .idle
     private var wakeObserver: NSObjectProtocol?
     private var lastRefreshStartAt: Date?
@@ -111,6 +115,15 @@ final class AppController: NSObject, NSMenuDelegate {
 
     @objc private func refreshNow() {
         triggerRefresh(reason: "manual", force: true)
+        refreshTokenReportIfNeeded(force: true, delay: 0)
+    }
+
+    @objc private func openUsageHistory() {
+        if usageHistoryWindowController == nil {
+            usageHistoryWindowController = UsageHistoryWindowController()
+        }
+        usageHistoryWindowController?.show(report: tokenReport, planHistory: planHistory, snapshot: snapshot)
+        triggerRefresh(reason: "history")
         refreshTokenReportIfNeeded(force: true, delay: 0)
     }
 
@@ -338,6 +351,7 @@ final class AppController: NSObject, NSMenuDelegate {
         launchAtLoginItem.target = self
         logoutItem.target = self
         openCodexItem.target = self
+        historyItem.target = self
         removeAccountItem.target = self
         quitItem.target = self
         headerView.onRefresh = { [weak self] in
@@ -355,6 +369,7 @@ final class AppController: NSObject, NSMenuDelegate {
         menu.addItem(tokenCostItem)
         menu.addItem(statusItemView)
         menu.addItem(.separator())
+        menu.addItem(historyItem)
         menu.addItem(accountsItem)
         menu.addItem(.separator())
         menu.addItem(launchAtLoginItem)
@@ -464,6 +479,9 @@ final class AppController: NSObject, NSMenuDelegate {
                     return
                 }
                 self.snapshot = snapshot
+                if !snapshot.isStale, let store = self.planHistoryStore {
+                    self.planHistory = store.record(snapshot)
+                }
                 self.refreshState = .idle
                 try self.syncAccountStateFromDisk()
             } catch {
@@ -547,6 +565,7 @@ final class AppController: NSObject, NSMenuDelegate {
         sparkUsageItem.isHidden = snapshot?.spark == nil
         tokenCostView.update(report: tokenReport)
         statusView.update(snapshot: snapshot, refreshState: refreshState, accountStatus: accountStatusMessage())
+        usageHistoryWindowController?.update(report: tokenReport, planHistory: planHistory, snapshot: snapshot)
         renderAccountsMenu()
 
         launchAtLoginItem.state = launchAtLoginController.isEnabled ? .on : .off
@@ -764,6 +783,8 @@ final class AppController: NSObject, NSMenuDelegate {
         )
         tokenReportStore = TokenUsageReportCacheStore(cacheURL: TokenUsageReportCacheStore.defaultCacheURL(profileID: profile.id))
         tokenReport = try? tokenReportStore?.load()
+        planHistoryStore = PlanUsageHistoryStore(fileURL: PlanUsageHistoryStore.defaultURL(profileID: profile.id))
+        planHistory = planHistoryStore?.load() ?? PlanUsageHistory()
         installAuthFileWatcher(for: profile)
     }
 

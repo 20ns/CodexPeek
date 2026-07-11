@@ -11,6 +11,8 @@ struct SelfTestRunner {
         try testRateLimitSelectorFallback()
         try testFutureCodexRateLimitSelector()
         try testCurrentModelPricing()
+        try testTokenUsageHistory()
+        try testPlanUsageHistoryStore()
         try testSessionLogFallback()
         try testProfileScopedCachePaths()
         try await testRepositoryPrecedence()
@@ -62,6 +64,52 @@ struct SelfTestRunner {
         let cost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-sol", usage: usage), "GPT-5.6 Sol pricing missing")
         try expect(cost.total == 35, "GPT-5.6 Sol pricing mismatch")
         try expect(TokenPricingCatalog.standard.displayModelName(for: "gpt-5.6-terra-2026") == "GPT-5.6 Terra", "GPT-5.6 Terra prefix pricing missing")
+        try expect(UIFormatters.compactTokenString(2_106_400_000) == "2.1B", "billion token formatting mismatch")
+    }
+
+    private func testTokenUsageHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let first = formatter.string(from: Date().addingTimeInterval(-3600))
+        let second = formatter.string(from: Date().addingTimeInterval(-1800))
+        let log = """
+        {"timestamp":"\(first)","type":"turn_context","payload":{"model":"gpt-5.4"}}
+        {"timestamp":"\(first)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":80,"cached_input_tokens":20,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":100}}}}
+        {"timestamp":"\(first)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":120,"cached_input_tokens":30,"output_tokens":40,"reasoning_output_tokens":10,"total_tokens":160}}}}
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":180,"cached_input_tokens":50,"output_tokens":70,"reasoning_output_tokens":20,"total_tokens":250}}}}
+        """
+        try Data(log.utf8).write(to: root.appendingPathComponent("rollout.jsonl"))
+
+        let report = try CodexTokenUsageSource(sessionsRootURL: root).usageReport()
+        let buckets = try unwrap(report.history?.buckets, "token history missing")
+        let totals = Dictionary(uniqueKeysWithValues: UsageHistoryAnalytics.modelTotals(
+            from: UsageHistoryAnalytics.dailyUsage(from: buckets, days: 2)
+        ).map { ($0.model, $0.usage.totalTokens) })
+
+        try expect(report.allTime.totalTokens == 250, "session token history should use the latest cumulative total")
+        try expect(report.allTime.sessionCount == 1, "history should retain session counts")
+        try expect(totals["gpt-5.4"] == 250, "model token history mismatch")
+    }
+
+    private func testPlanUsageHistoryStore() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = PlanUsageHistoryStore(fileURL: root.appendingPathComponent("history.json"))
+        let now = Date()
+        let reset = now.addingTimeInterval(24 * 60 * 60)
+        var snapshot = sampleSnapshot(source: .live, stale: false, email: "history@example.com", lastUpdatedAt: now)
+        snapshot.secondary = RateLimitWindowSnapshot(usedPercent: 20, windowDurationMins: 10080, resetsAt: reset)
+
+        _ = store.record(snapshot, at: now)
+        _ = store.record(snapshot, at: now.addingTimeInterval(10 * 60))
+        snapshot.secondary?.usedPercent = 21
+        _ = store.record(snapshot, at: now.addingTimeInterval(20 * 60))
+        _ = store.record(snapshot, at: now.addingTimeInterval(2 * 60 * 60))
+
+        let history = store.load()
+        try expect(history.samples.count == 3, "plan history should deduplicate unchanged minute samples")
+        try expect(history.samples.last?.secondaryPercent == 21, "plan history should persist changed usage")
     }
 
     private func testAccountProfileStore() throws {
