@@ -71,7 +71,9 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         report.month.topModel = last30DaysTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
         report.allTime.topModel = allTimeTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
         report.generatedAt = now
-        report.history = TokenUsageHistory(buckets: allBuckets.sorted { $0.startedAt < $1.startedAt })
+        report.history = TokenUsageHistory(buckets: allBuckets
+            .filter { $0.startedAt >= last30DaysCutoff }
+            .sorted { $0.startedAt < $1.startedAt })
         try? indexStore?.save(index)
         return report
     }
@@ -321,6 +323,13 @@ struct TokenPricingCatalog: Sendable {
     ])
 
     private let prices: [String: Price]
+    private let snapshotPrices: [(prefix: String, price: Price)]
+
+    private init(prices: [String: Price]) {
+        self.prices = prices
+        snapshotPrices = prices.map { ("\($0.key)-20", $0.value) }
+            .sorted { $0.prefix.count > $1.prefix.count }
+    }
 
     func estimateCost(for model: String, usage: TokenUsagePayload) -> Cost? {
         guard let price = price(for: model) else {
@@ -339,6 +348,12 @@ struct TokenPricingCatalog: Sendable {
         )
     }
 
+    func estimateCacheSavings(for model: String, usage: TokenUsagePayload) -> Decimal? {
+        guard let price = price(for: model) else { return nil }
+        return Decimal(max(0, usage.cachedInputTokens)) / 1_000_000
+            * (price.inputPerMillion - price.cachedInputPerMillion)
+    }
+
     func displayModelName(for model: String) -> String {
         price(for: model)?.displayName ?? model
     }
@@ -349,9 +364,7 @@ struct TokenPricingCatalog: Sendable {
             return exact
         }
 
-        return prices
-            .sorted { lhs, rhs in lhs.key.count > rhs.key.count }
-            .first { normalized.hasPrefix($0.key) }?.value
+        return snapshotPrices.first { normalized.hasPrefix($0.prefix) }?.price
     }
 }
 

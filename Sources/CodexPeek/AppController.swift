@@ -120,7 +120,9 @@ final class AppController: NSObject, NSMenuDelegate {
 
     @objc private func openUsageHistory() {
         if usageHistoryWindowController == nil {
-            usageHistoryWindowController = UsageHistoryWindowController()
+            usageHistoryWindowController = UsageHistoryWindowController { [weak self] in
+                self?.usageHistoryWindowController = nil
+            }
         }
         usageHistoryWindowController?.show(report: tokenReport, planHistory: planHistory, snapshot: snapshot)
         triggerRefresh(reason: "history")

@@ -63,7 +63,10 @@ struct SelfTestRunner {
         let usage = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 1_000_000, reasoningOutputTokens: 0, totalTokens: 2_000_000)
         let cost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-sol", usage: usage), "GPT-5.6 Sol pricing missing")
         try expect(cost.total == 35, "GPT-5.6 Sol pricing mismatch")
+        let cachedUsage = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 1_000_000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1_000_000)
+        try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-5.6-sol", usage: cachedUsage) == 4.5, "cache savings mismatch")
         try expect(TokenPricingCatalog.standard.displayModelName(for: "gpt-5.6-terra-2026") == "GPT-5.6 Terra", "GPT-5.6 Terra prefix pricing missing")
+        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.3-codex-spark", usage: usage) == nil, "unpriced variants should not inherit base pricing")
         try expect(UIFormatters.compactTokenString(2_106_400_000) == "2.1B", "billion token formatting mismatch")
     }
 
@@ -115,6 +118,7 @@ struct SelfTestRunner {
         try expect(report.week.totalTokens == 510, "recent history should count unique request deltas")
         try expect(report.month.totalTokens == 510, "30-day history should exclude older usage")
         try expect(report.allTime.sessionCount == 3, "history should retain session counts")
+        try expect(buckets.allSatisfy { $0.startedAt >= Date().addingTimeInterval(-30 * 24 * 60 * 60) }, "chart history should retain only 30 days")
         try expect(totals["gpt-5.4"] == 510, "model token history mismatch")
     }
 

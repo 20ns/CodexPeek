@@ -1,31 +1,36 @@
 import AppKit
+import Charts
+import SwiftUI
 
 @MainActor
-private enum HistoryPalette {
-    static let models: [NSColor] = [.systemBlue, .systemPurple, .systemGreen, .systemOrange, .systemPink, .systemTeal]
-}
+final class UsageHistoryWindowController: NSWindowController, NSWindowDelegate {
+    private let host = NSHostingView(rootView: UsageHistoryDashboard())
+    private let onClose: () -> Void
 
-@MainActor
-final class UsageHistoryWindowController: NSWindowController {
-    private let historyView = UsageHistoryView()
-
-    init() {
+    init(onClose: @escaping () -> Void) {
+        self.onClose = onClose
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 780, height: 720),
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 780),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "CodexPeek Usage History"
-        window.minSize = NSSize(width: 680, height: 650)
-        window.contentView = historyView
+        window.title = "CodexPeek Usage Telemetry"
+        window.minSize = NSSize(width: 820, height: 680)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = host
         super.init(window: window)
+        window.delegate = self
     }
 
     required init?(coder: NSCoder) { nil }
 
+    func windowWillClose(_ notification: Notification) {
+        onClose()
+    }
+
     func show(report: TokenUsageReport?, planHistory: PlanUsageHistory, snapshot: CodexUsageSnapshot?) {
-        historyView.update(report: report, planHistory: planHistory, snapshot: snapshot)
+        updateRoot(report: report, planHistory: planHistory, snapshot: snapshot)
         showWindow(nil)
         window?.center()
         NSApp.activate(ignoringOtherApps: true)
@@ -33,403 +38,544 @@ final class UsageHistoryWindowController: NSWindowController {
 
     func update(report: TokenUsageReport?, planHistory: PlanUsageHistory, snapshot: CodexUsageSnapshot?) {
         guard window?.isVisible == true else { return }
-        historyView.update(report: report, planHistory: planHistory, snapshot: snapshot)
+        updateRoot(report: report, planHistory: planHistory, snapshot: snapshot)
+    }
+
+    private func updateRoot(report: TokenUsageReport?, planHistory: PlanUsageHistory, snapshot: CodexUsageSnapshot?) {
+        host.rootView = UsageHistoryDashboard(report: report, planHistory: planHistory, snapshot: snapshot)
     }
 }
 
-@MainActor
-private final class UsageHistoryView: NSView {
-    private let subtitle = NSTextField(labelWithString: "")
-    private let todayValue = NSTextField(labelWithString: "—")
-    private let comparisonValue = NSTextField(labelWithString: "")
-    private let weekValue = NSTextField(labelWithString: "—")
-    private let weekDetail = NSTextField(labelWithString: "Compared with the prior 7 days")
-    private let cacheValue = NSTextField(labelWithString: "—")
-    private let cacheDetail = NSTextField(labelWithString: "Of input tokens served from cache")
-    private let rangeControl = NSSegmentedControl(labels: ["14 days", "30 days"], trackingMode: .selectOne, target: nil, action: nil)
-    private let chart = DailyUsageChartView()
-    private let modelBreakdown = NSTextField(labelWithString: "No token history yet")
-    private let planChart = PlanUsageChartView()
-    private let heatmap = ActivityHeatmapView()
-    private var report: TokenUsageReport?
-    private var planHistory = PlanUsageHistory()
-    private var snapshot: CodexUsageSnapshot?
+private enum TelemetryPalette {
+    static let canvas = Color(red: 0.035, green: 0.055, blue: 0.082)
+    static let panel = Color(red: 0.060, green: 0.088, blue: 0.125)
+    static let elevated = Color(red: 0.082, green: 0.118, blue: 0.165)
+    static let line = Color(red: 0.145, green: 0.196, blue: 0.255)
+    static let text = Color(red: 0.925, green: 0.950, blue: 0.970)
+    static let muted = Color(red: 0.510, green: 0.585, blue: 0.675)
+    static let blue = Color(red: 0.250, green: 0.610, blue: 0.980)
+    static let violet = Color(red: 0.675, green: 0.430, blue: 0.965)
+    static let amber = Color(red: 1.000, green: 0.675, blue: 0.260)
+    static let green = Color(red: 0.250, green: 0.800, blue: 0.610)
+    static let models = [blue, violet, green, amber, .pink, .cyan]
+}
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setup()
+private enum TelemetryType {
+    static func display(_ size: CGFloat) -> Font {
+        .custom("Avenir Next Condensed", fixedSize: size).weight(.semibold)
     }
 
-    required init?(coder: NSCoder) { nil }
-
-    func update(report: TokenUsageReport?, planHistory: PlanUsageHistory, snapshot: CodexUsageSnapshot?) {
-        self.report = report
-        self.planHistory = planHistory
-        self.snapshot = snapshot
-        reload()
+    static func body(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        .custom("Avenir Next", fixedSize: size).weight(weight)
     }
 
-    private func setup() {
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    static func data(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight, design: .monospaced)
+    }
+}
 
-        let title = NSTextField(labelWithString: "Usage History")
-        title.font = .systemFont(ofSize: 22, weight: .bold)
-        subtitle.font = .systemFont(ofSize: 12)
-        subtitle.textColor = .secondaryLabelColor
+private enum ChartMetric: String, CaseIterable, Identifiable {
+    case cost = "Cost"
+    case tokens = "Tokens"
+    var id: Self { self }
+}
 
-        rangeControl.selectedSegment = 0
-        rangeControl.target = self
-        rangeControl.action = #selector(rangeChanged)
+private struct UsageHistoryDashboard: View {
+    var report: TokenUsageReport?
+    var planHistory = PlanUsageHistory()
+    var snapshot: CodexUsageSnapshot?
 
-        let headerText = NSStackView(views: [title, subtitle])
-        headerText.orientation = .vertical
-        headerText.alignment = .leading
-        headerText.spacing = 3
-        let header = NSStackView(views: [headerText, rangeControl])
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.distribution = .fill
-        headerText.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        rangeControl.setContentHuggingPriority(.required, for: .horizontal)
+    @State private var range = 14
+    @State private var metric = ChartMetric.cost
 
-        let cards = NSStackView(views: [
-            summaryCard(title: "TODAY", value: todayValue, detail: comparisonValue),
-            summaryCard(title: "LAST 7 DAYS", value: weekValue, detail: weekDetail),
-            summaryCard(title: "CACHE REUSE", value: cacheValue, detail: cacheDetail)
-        ])
-        cards.orientation = .horizontal
-        cards.distribution = .fillEqually
-        cards.spacing = 10
-
-        chart.translatesAutoresizingMaskIntoConstraints = false
-        planChart.translatesAutoresizingMaskIntoConstraints = false
-        heatmap.translatesAutoresizingMaskIntoConstraints = false
-        modelBreakdown.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        modelBreakdown.textColor = .secondaryLabelColor
-        modelBreakdown.maximumNumberOfLines = 1
-        modelBreakdown.lineBreakMode = .byTruncatingTail
-
-        let tokenPanel = panel(title: "Token usage", subtitle: "Daily totals, stacked by model", views: [chart, modelBreakdown])
-        let planPanel = panel(title: "Weekly plan", subtitle: "Observed allowance history", views: [planChart])
-        let activityPanel = panel(title: "Activity pattern", subtitle: "Tokens by weekday and hour", views: [heatmap])
-        let lowerRow = NSStackView(views: [planPanel, activityPanel])
-        lowerRow.orientation = .horizontal
-        lowerRow.alignment = .top
-        lowerRow.distribution = .fill
-        lowerRow.spacing = 12
-        lowerRow.translatesAutoresizingMaskIntoConstraints = false
-
-        let stack = NSStackView(views: [
-            header,
-            cards,
-            tokenPanel,
-            lowerRow
-        ])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let document = NSView()
-        document.translatesAutoresizingMaskIntoConstraints = false
-        document.addSubview(stack)
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        scroll.documentView = document
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(scroll)
-
-        NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: topAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
-            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -24),
-            stack.topAnchor.constraint(equalTo: document.topAnchor, constant: 24),
-            stack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -24),
-            header.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            cards.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            tokenPanel.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            lowerRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            header.heightAnchor.constraint(equalToConstant: 48),
-            cards.heightAnchor.constraint(equalToConstant: 96),
-            tokenPanel.heightAnchor.constraint(equalToConstant: 260),
-            lowerRow.heightAnchor.constraint(equalToConstant: 205),
-            planPanel.widthAnchor.constraint(equalTo: activityPanel.widthAnchor, multiplier: 0.56),
-            planPanel.heightAnchor.constraint(equalTo: lowerRow.heightAnchor),
-            activityPanel.heightAnchor.constraint(equalTo: lowerRow.heightAnchor),
-            chart.heightAnchor.constraint(equalToConstant: 156),
-            modelBreakdown.heightAnchor.constraint(equalToConstant: 18),
-            planChart.heightAnchor.constraint(equalToConstant: 112),
-            heatmap.heightAnchor.constraint(equalToConstant: 112)
-        ])
+    private var sourceLine: String {
+        guard let snapshot else { return "Local session logs" }
+        return "\(snapshot.account.planType.displayName) plan  ·  local session logs  ·  refreshed \(UIFormatters.usageUpdatedString(from: snapshot.lastUpdatedAt))"
     }
 
-    private func summaryCard(title: String, value: NSTextField, detail: NSTextField) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 10, weight: .semibold)
-        label.textColor = .secondaryLabelColor
-        value.font = .monospacedDigitSystemFont(ofSize: 23, weight: .semibold)
-        value.lineBreakMode = .byTruncatingTail
-        detail.font = .systemFont(ofSize: 11)
-        detail.textColor = .secondaryLabelColor
-        detail.lineBreakMode = .byTruncatingTail
-        let stack = NSStackView(views: [label, value, detail])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 4
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        let box = NSBox()
-        box.boxType = .custom
-        box.cornerRadius = 8
-        box.borderColor = .separatorColor
-        box.borderWidth = 1
-        box.fillColor = NSColor.controlBackgroundColor.withAlphaComponent(0.72)
-        guard let content = box.contentView else { return box }
-        content.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
-            stack.centerYAnchor.constraint(equalTo: content.centerYAnchor)
-        ])
-        return box
-    }
-
-    private func panel(title: String, subtitle: String, views: [NSView]) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 13, weight: .semibold)
-        let detail = NSTextField(labelWithString: subtitle)
-        detail.font = .systemFont(ofSize: 10)
-        detail.textColor = .secondaryLabelColor
-        let header = NSStackView(views: [label, detail])
-        header.orientation = .vertical
-        header.alignment = .leading
-        header.spacing = 1
-        let stack = NSStackView(views: [header] + views)
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        views.forEach { $0.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
-
-        let box = NSBox()
-        box.boxType = .custom
-        box.cornerRadius = 10
-        box.borderColor = .separatorColor
-        box.borderWidth = 1
-        box.fillColor = NSColor.controlBackgroundColor.withAlphaComponent(0.4)
-        guard let content = box.contentView else { return box }
-        content.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -12)
-        ])
-        return box
-    }
-
-    @objc private func rangeChanged() { reload() }
-
-    private func reload() {
-        let days = rangeControl.selectedSegment == 1 ? 30 : 14
+    var body: some View {
         let buckets = report?.history?.buckets ?? []
-        let daily = UsageHistoryAnalytics.dailyUsage(from: buckets, days: days)
-        let models = UsageHistoryAnalytics.modelTotals(from: daily)
-        let comparison = UsageHistoryAnalytics.todayComparison(from: buckets)
-        let percent = comparison.yesterday > 0
-            ? Int((Double(comparison.today - comparison.yesterday) / Double(comparison.yesterday) * 100).rounded())
-            : nil
-
-        let now = Date()
-        let weekStart = now.addingTimeInterval(-7 * 24 * 60 * 60)
-        let priorWeekStart = now.addingTimeInterval(-14 * 24 * 60 * 60)
-        let weekUsage = UsageHistoryAnalytics.usage(from: buckets, since: weekStart, before: now)
-        let priorWeekUsage = UsageHistoryAnalytics.usage(from: buckets, since: priorWeekStart, before: weekStart)
-        let weekChange = priorWeekUsage.totalTokens > 0
-            ? Int((Double(weekUsage.totalTokens - priorWeekUsage.totalTokens) / Double(priorWeekUsage.totalTokens) * 100).rounded())
-            : nil
-        let cacheRate = weekUsage.inputTokens > 0
-            ? Int((Double(weekUsage.cachedInputTokens) / Double(weekUsage.inputTokens) * 100).rounded())
-            : nil
-
-        todayValue.stringValue = UIFormatters.compactTokenString(comparison.today)
-        comparisonValue.stringValue = percent.map { "\($0 >= 0 ? "+" : "")\($0)% vs yesterday by now" } ?? "No comparable usage yesterday"
-        weekValue.stringValue = UIFormatters.compactTokenString(weekUsage.totalTokens)
-        weekDetail.stringValue = weekChange.map { "\($0 >= 0 ? "+" : "")\($0)% vs prior 7 days" } ?? "Prior-week comparison is building"
-        cacheValue.stringValue = cacheRate.map { "\($0)%" } ?? "—"
-        cacheDetail.stringValue = cacheRate == nil ? "Cache data is still building" : "Of input tokens served from cache"
-        subtitle.stringValue = snapshot.map { "\($0.account.planType.displayName) • local session logs • updated \(UIFormatters.usageUpdatedString(from: $0.lastUpdatedAt))" }
-            ?? "Local session logs"
-
-        let names = models.map { $0.model }
-        chart.emptyMessage = report?.history == nil ? "Building history from local sessions…" : "No token activity in this range"
-        chart.update(days: daily, models: names)
-        heatmap.values = UsageHistoryAnalytics.hourlyActivity(from: buckets, days: days)
-        planChart.update(samples: planHistory.samples, days: days)
-        let legend = NSMutableAttributedString()
-        let rangeTotal = max(1, models.reduce(0) { $0 + $1.usage.totalTokens })
-        for (index, item) in models.prefix(3).enumerated() {
-            let (model, usage) = item
-            let cost = TokenPricingCatalog.standard.estimateCost(for: model, usage: usage)?.total ?? 0
-            let share = Int((Double(usage.totalTokens) / Double(rangeTotal) * 100).rounded())
-            if index > 0 { legend.append(NSAttributedString(string: "     ")) }
-            legend.append(NSAttributedString(
-                string: "● ",
-                attributes: [.foregroundColor: HistoryPalette.models[index % HistoryPalette.models.count]]
-            ))
-            legend.append(NSAttributedString(
-                string: "\(TokenPricingCatalog.standard.displayModelName(for: model))  \(share)%  \(UIFormatters.compactTokenString(usage.totalTokens))  \(UIFormatters.costString(cost))",
-                attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.secondaryLabelColor]
-            ))
-        }
-        modelBreakdown.attributedStringValue = legend.length > 0
-            ? legend
-            : NSAttributedString(string: "Model mix will appear when token history is ready.", attributes: [.foregroundColor: NSColor.secondaryLabelColor])
-    }
-}
-
-@MainActor
-private final class DailyUsageChartView: NSView {
-    private var days: [DailyTokenUsage] = []
-    private var models: [String] = []
-    var emptyMessage = "No token activity in this range"
-
-    func update(days: [DailyTokenUsage], models: [String]) {
-        self.days = days
-        self.models = models
-        needsDisplay = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        guard !days.isEmpty else { return }
-        let plot = NSRect(x: 8, y: 22, width: bounds.width - 16, height: bounds.height - 30)
-        let maxTokens = max(1, days.map(\.totalTokens).max() ?? 1)
-        let slot = plot.width / CGFloat(days.count)
-        let formatter = DateFormatter()
-        formatter.setLocalizedDateFormatFromTemplate("d MMM")
-
-        for step in 0...3 {
-            let y = plot.minY + plot.height * CGFloat(step) / 3
-            NSColor.separatorColor.withAlphaComponent(0.45).setStroke()
-            let line = NSBezierPath()
-            line.move(to: NSPoint(x: plot.minX, y: y))
-            line.line(to: NSPoint(x: plot.maxX, y: y))
-            line.stroke()
-        }
-
-        if days.allSatisfy({ $0.totalTokens == 0 }) {
-            let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.secondaryLabelColor]
-            let size = emptyMessage.size(withAttributes: attributes)
-            emptyMessage.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: plot.midY - size.height / 2), withAttributes: attributes)
-        }
-
-        for (index, day) in days.enumerated() {
-            let x = plot.minX + CGFloat(index) * slot + 2
-            let width = max(2, slot - 4)
-            var y = plot.minY
-            for (modelIndex, model) in models.enumerated() {
-                let tokens = day.byModel[model]?.totalTokens ?? 0
-                let height = plot.height * CGFloat(tokens) / CGFloat(maxTokens)
-                HistoryPalette.models[modelIndex % HistoryPalette.models.count].setFill()
-                if height > 0 {
-                    NSBezierPath(roundedRect: NSRect(x: x, y: y, width: width, height: height), xRadius: 2, yRadius: 2).fill()
+        ZStack {
+            TelemetryPalette.canvas.ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 14) {
+                    header
+                    primaryPanel(buckets: buckets)
+                    HStack(alignment: .top, spacing: 14) {
+                        TelemetryPanel { PlanPanel(samples: planHistory.samples, range: range) }
+                        TelemetryPanel { ActivityPanel(values: UsageHistoryAnalytics.hourlyActivity(from: buckets, days: range)) }
+                    }
                 }
-                y += height
+                .padding(24)
             }
-            if index == 0 || index == days.count - 1 || index == days.count / 2 {
-                formatter.string(from: day.day).draw(
-                    at: NSPoint(x: x, y: 2),
-                    withAttributes: [.font: NSFont.systemFont(ofSize: 9), .foregroundColor: NSColor.secondaryLabelColor]
+        }
+        .preferredColorScheme(.dark)
+        .tint(TelemetryPalette.blue)
+    }
+
+    private var header: some View {
+        HStack(alignment: .bottom) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(TelemetryPalette.green)
+                        .frame(width: 7, height: 7)
+                        .shadow(color: TelemetryPalette.green.opacity(0.65), radius: 5)
+                    Text("CODEXPEEK  /  LOCAL TELEMETRY")
+                        .font(TelemetryType.data(10, weight: .semibold))
+                        .tracking(1.1)
+                        .foregroundStyle(TelemetryPalette.muted)
+                }
+                Text("Usage telemetry")
+                    .font(TelemetryType.display(34))
+                    .foregroundStyle(TelemetryPalette.text)
+                Text(sourceLine)
+                    .font(TelemetryType.body(11, weight: .medium))
+                    .foregroundStyle(TelemetryPalette.muted)
+            }
+            Spacer()
+            Picker("Range", selection: $range) {
+                Text("7 days").tag(7)
+                Text("14 days").tag(14)
+                Text("30 days").tag(30)
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .frame(width: 220)
+            .accessibilityLabel("History range")
+        }
+        .padding(.horizontal, 2)
+    }
+
+    private func primaryPanel(buckets: [TokenUsageBucket]) -> some View {
+        let daily = UsageHistoryAnalytics.dailyUsage(from: buckets, days: range)
+        let days = daily.map(DaySnapshot.init)
+        let total = max(1, daily.reduce(0) { $0 + $1.totalTokens })
+        let models = UsageHistoryAnalytics.modelTotals(from: daily).map {
+            ModelSummary(model: $0.model, usage: $0.usage, rangeTotal: total)
+        }
+        let totalCost = days.reduce(0) { $0 + $1.cost }
+        let cacheSavings = days.reduce(0) { $0 + $1.cacheSavings }
+        let activeDays = days.filter { $0.tokens > 0 }.count
+        let hasUnpricedUsage = models.contains { $0.cost == nil }
+
+        return TelemetryPanel {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(metric == .cost ? "Cost burn" : "Token throughput")
+                            .font(TelemetryType.display(22))
+                            .foregroundStyle(TelemetryPalette.text)
+                        Text(metric == .cost
+                            ? "Daily API-equivalent spend\(hasUnpricedUsage ? " · known prices only" : "")"
+                            : "Daily tokens stacked by model")
+                            .font(TelemetryType.body(11, weight: .medium))
+                            .foregroundStyle(TelemetryPalette.muted)
+                    }
+                    Spacer()
+                    Picker("Metric", selection: $metric) {
+                        ForEach(ChartMetric.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 154)
+                    .accessibilityLabel("Chart metric")
+                }
+
+                HStack(spacing: 0) {
+                    MetricCell(label: "EST. SPEND", value: money(totalCost), detail: hasUnpricedUsage ? "known prices only" : "selected range")
+                    metricDivider
+                    MetricCell(label: "CACHE SAVED", value: money(cacheSavings), detail: hasUnpricedUsage ? "known prices only" : "vs uncached input", tint: TelemetryPalette.violet)
+                    metricDivider
+                    MetricCell(label: "ACTIVE-DAY AVG", value: money(totalCost / Double(max(1, activeDays))), detail: "\(activeDays) active days")
+                    metricDivider
+                    MetricCell(label: "30-DAY PACE", value: money(totalCost / Double(range) * 30), detail: "at current rate", tint: TelemetryPalette.amber)
+                }
+                .padding(.vertical, 10)
+                .background(TelemetryPalette.elevated.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
+
+                Group {
+                    if metric == .cost {
+                        CostChart(days: days)
+                    } else {
+                        TokenChart(days: days, models: models.map(\.model))
+                    }
+                }
+                .frame(height: 245)
+
+                if models.isEmpty {
+                    Text(report?.history == nil ? "Building history from local sessions…" : "No token activity in this range")
+                        .font(TelemetryType.body(11, weight: .medium))
+                        .foregroundStyle(TelemetryPalette.muted)
+                } else {
+                    HStack(spacing: 22) {
+                        ForEach(Array(models.prefix(3).enumerated()), id: \.element.id) { index, model in
+                            ModelKey(model: model, color: TelemetryPalette.models[index % TelemetryPalette.models.count])
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var metricDivider: some View {
+        Rectangle().fill(TelemetryPalette.line).frame(width: 1, height: 44)
+    }
+
+    private func money(_ value: Double) -> String {
+        UIFormatters.costString(Decimal(value))
+    }
+}
+
+private struct TelemetryPanel<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(TelemetryPalette.panel, in: RoundedRectangle(cornerRadius: 15))
+            .overlay(RoundedRectangle(cornerRadius: 15).stroke(TelemetryPalette.line, lineWidth: 1))
+    }
+}
+
+private struct MetricCell: View {
+    let label: String
+    let value: String
+    let detail: String
+    var tint = TelemetryPalette.text
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label)
+                .font(TelemetryType.data(9, weight: .semibold))
+                .tracking(0.7)
+                .foregroundStyle(TelemetryPalette.muted)
+            Text(value)
+                .font(TelemetryType.display(23))
+                .foregroundStyle(tint)
+            Text(detail)
+                .font(TelemetryType.body(10, weight: .medium))
+                .foregroundStyle(TelemetryPalette.muted)
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct CostChart: View {
+    let days: [DaySnapshot]
+    @State private var selectedDate: Date?
+
+    private var selected: DaySnapshot? { nearestDay(to: selectedDate, in: days) }
+
+    var body: some View {
+        Chart {
+            ForEach(days) { day in
+                AreaMark(x: .value("Day", day.day), y: .value("Cost", day.cost))
+                    .interpolationMethod(.monotone)
+                    .foregroundStyle(LinearGradient(colors: [TelemetryPalette.blue.opacity(0.34), TelemetryPalette.blue.opacity(0.01)], startPoint: .top, endPoint: .bottom))
+                LineMark(x: .value("Day", day.day), y: .value("Cost", day.cost))
+                    .interpolationMethod(.monotone)
+                    .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+                    .foregroundStyle(TelemetryPalette.blue)
+            }
+            if let selected {
+                RuleMark(x: .value("Selected", selected.day))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                    .foregroundStyle(TelemetryPalette.text.opacity(0.55))
+                    .annotation(position: .top, spacing: 8) { DayCallout(day: selected, metric: .cost) }
+                PointMark(x: .value("Selected", selected.day), y: .value("Cost", selected.cost))
+                    .symbolSize(52)
+                    .foregroundStyle(TelemetryPalette.text)
+            }
+        }
+        .chartXSelection(value: $selectedDate)
+        .telemetryAxes(range: days.count, money: true)
+        .accessibilityLabel("Daily estimated cost chart")
+    }
+}
+
+private struct TokenChart: View {
+    let days: [DaySnapshot]
+    let models: [String]
+    @State private var selectedDate: Date?
+
+    private var points: [ModelDayPoint] {
+        days.flatMap { day in
+            models.map { ModelDayPoint(day: day.day, model: $0, tokens: day.byModel[$0]?.totalTokens ?? 0) }
+        }
+    }
+
+    private var selected: DaySnapshot? { nearestDay(to: selectedDate, in: days) }
+
+    var body: some View {
+        Chart {
+            ForEach(points) { point in
+                BarMark(
+                    x: .value("Day", point.day, unit: .day),
+                    y: .value("Tokens", point.tokens)
                 )
+                .foregroundStyle(by: .value("Model", point.model))
+                .cornerRadius(2)
+            }
+            if let selected {
+                RuleMark(x: .value("Selected", selected.day))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 4]))
+                    .foregroundStyle(TelemetryPalette.text.opacity(0.55))
+                    .annotation(position: .top, spacing: 8) { DayCallout(day: selected, metric: .tokens) }
+            }
+        }
+        .chartForegroundStyleScale(domain: models, range: Array(TelemetryPalette.models.prefix(models.count)))
+        .chartLegend(.hidden)
+        .chartXSelection(value: $selectedDate)
+        .telemetryAxes(range: days.count, money: false)
+        .accessibilityLabel("Daily token chart by model")
+    }
+}
+
+private extension View {
+    func telemetryAxes(range: Int, money: Bool) -> some View {
+        chartXAxis {
+            AxisMarks(values: .stride(by: .day, count: max(1, range / 4))) {
+                AxisTick().foregroundStyle(TelemetryPalette.line)
+                AxisValueLabel(format: .dateTime.day().month(.abbreviated))
+                    .font(TelemetryType.data(9))
+                    .foregroundStyle(TelemetryPalette.muted)
+            }
+        }
+        .chartYAxis {
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+                AxisGridLine().foregroundStyle(TelemetryPalette.line.opacity(0.75))
+                AxisValueLabel {
+                    if let number = value.as(Double.self) {
+                        Text(money ? costAxis(number) : UIFormatters.compactTokenString(Int(number)))
+                    }
+                }
+                .font(TelemetryType.data(9))
+                .foregroundStyle(TelemetryPalette.muted)
+            }
+        }
+        .chartPlotStyle { plot in
+            plot.background(TelemetryPalette.canvas.opacity(0.34))
+        }
+    }
+}
+
+private struct DayCallout: View {
+    let day: DaySnapshot
+    let metric: ChartMetric
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(day.day.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)).uppercased())
+                .font(TelemetryType.data(9, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(TelemetryPalette.muted)
+            Text(metric == .cost ? UIFormatters.costString(Decimal(day.cost)) : UIFormatters.compactTokenString(day.tokens))
+                .font(TelemetryType.display(20))
+                .foregroundStyle(TelemetryPalette.text)
+            HStack(spacing: 10) {
+                Label("\(day.cacheRate)% cache", systemImage: "arrow.triangle.2.circlepath")
+                if let model = day.topModel {
+                    Text(TokenPricingCatalog.standard.displayModelName(for: model))
+                }
+            }
+            .font(TelemetryType.body(9, weight: .medium))
+            .foregroundStyle(TelemetryPalette.muted)
+        }
+        .padding(10)
+        .background(TelemetryPalette.elevated, in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(TelemetryPalette.line))
+        .shadow(color: .black.opacity(0.3), radius: 10, y: 5)
+    }
+}
+
+private struct ModelKey: View {
+    let model: ModelSummary
+    let color: Color
+
+    var body: some View {
+        let cost = model.cost.map(UIFormatters.costString) ?? "unpriced"
+        HStack(spacing: 8) {
+            Circle().fill(color).frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(TokenPricingCatalog.standard.displayModelName(for: model.model))
+                    .font(TelemetryType.body(11, weight: .semibold))
+                    .foregroundStyle(TelemetryPalette.text)
+                Text("\(model.share)%  ·  \(UIFormatters.compactTokenString(model.usage.totalTokens))  ·  \(cost)")
+                    .font(TelemetryType.data(9))
+                    .foregroundStyle(TelemetryPalette.muted)
             }
         }
     }
 }
 
-@MainActor
-private final class PlanUsageChartView: NSView {
-    private var samples: [PlanUsageSample] = []
-    private var days = 14
+private struct PlanPanel: View {
+    let samples: [PlanUsageSample]
+    let range: Int
 
-    func update(samples: [PlanUsageSample], days: Int) {
-        self.samples = samples
-        self.days = days
-        needsDisplay = true
+    private var selected: [PlanUsageSample] {
+        let start = Date().addingTimeInterval(TimeInterval(-range * 24 * 60 * 60))
+        return samples.filter { $0.recordedAt >= start && $0.secondaryPercent != nil }
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        let now = Date()
-        let requestedStart = now.addingTimeInterval(TimeInterval(-days * 24 * 60 * 60))
-        let start = max(requestedStart, samples.first?.recordedAt ?? requestedStart)
-        let selected = samples.filter { $0.recordedAt >= start && $0.recordedAt <= now && $0.secondaryPercent != nil }
-        guard !selected.isEmpty else {
-            "History begins after this update".draw(at: NSPoint(x: 8, y: bounds.midY), withAttributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
-            return
+    var body: some View {
+        let selected = selected
+        VStack(alignment: .leading, spacing: 10) {
+            PanelHeader(title: "Weekly limit", detail: "Observed plan allowance", value: selected.last?.secondaryPercent.map { "\($0)%" })
+            if selected.isEmpty {
+                EmptyChart(message: "History starts after the next refresh")
+            } else {
+                Chart(selected, id: \.recordedAt) { sample in
+                    AreaMark(x: .value("Time", sample.recordedAt), y: .value("Used", sample.secondaryPercent ?? 0))
+                        .foregroundStyle(LinearGradient(colors: [TelemetryPalette.violet.opacity(0.28), .clear], startPoint: .top, endPoint: .bottom))
+                    LineMark(x: .value("Time", sample.recordedAt), y: .value("Used", sample.secondaryPercent ?? 0))
+                        .interpolationMethod(.stepEnd)
+                        .foregroundStyle(TelemetryPalette.violet)
+                        .lineStyle(StrokeStyle(lineWidth: 2))
+                }
+                .chartYScale(domain: 0...100)
+                .chartYAxis {
+                    AxisMarks(values: [0, 50, 100]) { value in
+                        AxisGridLine().foregroundStyle(TelemetryPalette.line)
+                        AxisValueLabel { Text("\(value.as(Int.self) ?? 0)%") }
+                            .font(TelemetryType.data(8))
+                            .foregroundStyle(TelemetryPalette.muted)
+                    }
+                }
+                .chartXAxis(.hidden)
+                .frame(height: 130)
+            }
         }
-        let plot = bounds.insetBy(dx: 6, dy: 12)
-        for step in 0...2 {
-            let y = plot.minY + plot.height * CGFloat(step) / 2
-            NSColor.separatorColor.withAlphaComponent(0.45).setStroke()
-            let line = NSBezierPath()
-            line.move(to: NSPoint(x: plot.minX, y: y))
-            line.line(to: NSPoint(x: plot.maxX, y: y))
-            line.stroke()
+        .frame(minHeight: 180, alignment: .top)
+    }
+}
+
+private struct ActivityPanel: View {
+    let values: [[Int]]
+
+    var body: some View {
+        let maximum = max(1, values.flatMap { $0 }.max() ?? 1)
+        VStack(alignment: .leading, spacing: 10) {
+            PanelHeader(title: "Work rhythm", detail: "Tokens by weekday and hour")
+            HStack(spacing: 3) {
+                Color.clear.frame(width: 30, height: 10)
+                ForEach(0..<24, id: \.self) { hour in
+                    Text(hour.isMultiple(of: 6) ? "\(hour)" : "")
+                        .font(TelemetryType.data(8))
+                        .foregroundStyle(TelemetryPalette.muted)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            VStack(spacing: 4) {
+                ForEach(0..<7, id: \.self) { day in
+                    HStack(spacing: 3) {
+                        Text(Calendar.current.shortWeekdaySymbols[day])
+                            .font(TelemetryType.body(9, weight: .semibold))
+                            .foregroundStyle(TelemetryPalette.muted)
+                            .frame(width: 30, alignment: .leading)
+                        ForEach(0..<24, id: \.self) { hour in
+                            let intensity = pow(Double(values[day][hour]) / Double(maximum), 0.4)
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(TelemetryPalette.blue.opacity(0.08 + intensity * 0.85))
+                                .frame(maxWidth: .infinity, minHeight: 13)
+                                .help("\(Calendar.current.weekdaySymbols[day]) at \(hour):00 · \(UIFormatters.compactTokenString(values[day][hour])) tokens")
+                        }
+                    }
+                }
+            }
         }
-        let path = NSBezierPath()
-        for (index, sample) in selected.enumerated() {
-            let duration = max(1, now.timeIntervalSince(start))
-            let x = plot.minX + plot.width * CGFloat(sample.recordedAt.timeIntervalSince(start) / duration)
-            let y = plot.minY + plot.height * CGFloat(sample.secondaryPercent ?? 0) / 100
-            index == 0 ? path.move(to: NSPoint(x: x, y: y)) : path.line(to: NSPoint(x: x, y: y))
-        }
-        NSColor.systemBlue.setStroke()
-        path.lineWidth = 2
-        path.stroke()
-        if let latest = selected.last, let percent = latest.secondaryPercent {
-            let x = plot.minX + plot.width * CGFloat(latest.recordedAt.timeIntervalSince(start) / max(1, now.timeIntervalSince(start)))
-            let y = plot.minY + plot.height * CGFloat(percent) / 100
-            NSColor.systemBlue.setFill()
-            NSBezierPath(ovalIn: NSRect(x: x - 3, y: y - 3, width: 6, height: 6)).fill()
-            "\(percent)%".draw(at: NSPoint(x: min(x + 6, plot.maxX - 28), y: min(y + 4, plot.maxY - 12)), withAttributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .semibold), .foregroundColor: NSColor.secondaryLabelColor])
+        .frame(minHeight: 180, alignment: .top)
+    }
+}
+
+private struct PanelHeader: View {
+    let title: String
+    let detail: String
+    var value: String?
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(TelemetryType.display(18)).foregroundStyle(TelemetryPalette.text)
+                Text(detail).font(TelemetryType.body(10, weight: .medium)).foregroundStyle(TelemetryPalette.muted)
+            }
+            Spacer()
+            if let value {
+                Text(value).font(TelemetryType.data(15, weight: .semibold)).foregroundStyle(TelemetryPalette.violet)
+            }
         }
     }
 }
 
-@MainActor
-private final class ActivityHeatmapView: NSView {
-    var values = Array(repeating: Array(repeating: 0, count: 24), count: 7) { didSet { needsDisplay = true } }
+private struct EmptyChart: View {
+    let message: String
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        let labels = Calendar.current.shortWeekdaySymbols
-        let maxValue = max(1, values.flatMap { $0 }.max() ?? 1)
-        let left: CGFloat = 28
-        let top: CGFloat = 16
-        let cellWidth = (bounds.width - left - 4) / 24
-        let cellHeight = (bounds.height - top - 4) / 7
-        for day in 0..<7 {
-            labels[day].draw(at: NSPoint(x: 0, y: bounds.height - top - CGFloat(day + 1) * cellHeight + 2), withAttributes: [.font: NSFont.systemFont(ofSize: 9), .foregroundColor: NSColor.secondaryLabelColor])
-            for hour in 0..<24 {
-                let intensity = CGFloat(values[day][hour]) / CGFloat(maxValue)
-                NSColor.systemBlue.withAlphaComponent(0.06 + intensity * 0.78).setFill()
-                let rect = NSRect(
-                    x: left + CGFloat(hour) * cellWidth,
-                    y: bounds.height - top - CGFloat(day + 1) * cellHeight,
-                    width: max(2, cellWidth - 2),
-                    height: max(2, cellHeight - 2)
-                )
-                NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2).fill()
-            }
-        }
-        for hour in stride(from: 0, to: 24, by: 6) {
-            "\(hour)".draw(at: NSPoint(x: left + CGFloat(hour) * cellWidth, y: bounds.height - 11), withAttributes: [.font: NSFont.systemFont(ofSize: 9), .foregroundColor: NSColor.secondaryLabelColor])
-        }
+    var body: some View {
+        Text(message)
+            .font(TelemetryType.body(11, weight: .medium))
+            .foregroundStyle(TelemetryPalette.muted)
+            .frame(maxWidth: .infinity, minHeight: 130)
+            .background(TelemetryPalette.canvas.opacity(0.25), in: RoundedRectangle(cornerRadius: 9))
     }
+}
+
+private struct DaySnapshot: Identifiable {
+    let day: Date
+    let byModel: [String: TokenUsagePayload]
+    let tokens: Int
+    let cost: Double
+    let cacheSavings: Double
+    let cacheRate: Int
+    let topModel: String?
+    var id: Date { day }
+
+    init(_ source: DailyTokenUsage) {
+        var usage = TokenUsagePayload.zero
+        for value in source.byModel.values { usage.add(value) }
+        day = source.day
+        byModel = source.byModel
+        tokens = usage.totalTokens
+        cost = source.byModel.reduce(0) {
+            $0 + NSDecimalNumber(decimal: TokenPricingCatalog.standard.estimateCost(for: $1.key, usage: $1.value)?.total ?? 0).doubleValue
+        }
+        cacheSavings = source.byModel.reduce(0) {
+            $0 + NSDecimalNumber(decimal: TokenPricingCatalog.standard.estimateCacheSavings(for: $1.key, usage: $1.value) ?? 0).doubleValue
+        }
+        cacheRate = usage.inputTokens > 0 ? Int((Double(usage.cachedInputTokens) / Double(usage.inputTokens) * 100).rounded()) : 0
+        topModel = source.byModel.max { $0.value.totalTokens < $1.value.totalTokens }?.key
+    }
+}
+
+private struct ModelDayPoint: Identifiable {
+    let day: Date
+    let model: String
+    let tokens: Int
+    var id: String { "\(day.timeIntervalSinceReferenceDate)-\(model)" }
+}
+
+private struct ModelSummary: Identifiable {
+    let model: String
+    let usage: TokenUsagePayload
+    let share: Int
+    let cost: Decimal?
+    var id: String { model }
+
+    init(model: String, usage: TokenUsagePayload, rangeTotal: Int) {
+        self.model = model
+        self.usage = usage
+        share = Int((Double(usage.totalTokens) / Double(rangeTotal) * 100).rounded())
+        cost = TokenPricingCatalog.standard.estimateCost(for: model, usage: usage)?.total
+    }
+}
+
+private func nearestDay(to date: Date?, in days: [DaySnapshot]) -> DaySnapshot? {
+    guard let date else { return nil }
+    return days.min { abs($0.day.timeIntervalSince(date)) < abs($1.day.timeIntervalSince(date)) }
+}
+
+private func costAxis(_ value: Double) -> String {
+    value >= 10 ? String(format: "$%.0f", value) : String(format: "$%.2f", value)
 }

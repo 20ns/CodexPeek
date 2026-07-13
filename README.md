@@ -22,13 +22,13 @@ On my Mac, CodexPeek is materially lighter than CodexBar for the narrow job of s
 
 - Idle memory in `top`: about `21 MB` for CodexPeek vs about `56 MB` for CodexBar
 - Rough cold launch to process start: about `47.6 ms` for CodexPeek vs about `113.4 ms` for CodexBar
-- App size on disk: `1.4 MB` for CodexPeek vs `68 MB` for CodexBar
+- App size on disk: about `3 MB` for CodexPeek vs `68 MB` for CodexBar
 
 CodexBar supports a broader feature set, so this is not a blanket "better app" claim. It is a focused overhead comparison for this specific use case: lightweight Codex usage visibility on macOS.
 
 ## Why CodexPeek
 
-- Native macOS app, built with `Swift + AppKit`
+- Native macOS app, built with `Swift + AppKit` and a Swift Charts history view
 - No Electron, no webview, no Tauri
 - No always-on Codex helper process
 - Reads live usage from the official local `codex app-server` protocol
@@ -40,7 +40,7 @@ CodexBar supports a broader feature set, so this is not a blanket "better app" c
 
 Measured locally on Apple silicon during development:
 - Idle CPU: effectively `0%`
-- Idle memory: about `12 MB` in `top`
+- Idle memory: about `21 MB` in `top`
 - Refreshes happen on demand and once per minute, with brief transient spikes only while talking to Codex
 
 ## macOS Only
