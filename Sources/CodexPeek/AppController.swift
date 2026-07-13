@@ -859,42 +859,34 @@ final class AppController: NSObject, NSMenuDelegate {
         let profileID = activeProfile.id
         let generation = tokenReportGeneration
 
-        tokenReportTask = Task.detached(priority: .utility) { [weak self, profileID, generation, tokenUsageSource, tokenReportStore] in
+        tokenReportTask = Task { [weak self, profileID, generation, tokenUsageSource, tokenReportStore] in
             if delay > 0 {
                 try? await Task.sleep(for: .seconds(delay))
             }
 
             guard !Task.isCancelled else {
-                await MainActor.run {
-                    guard self?.activeProfile?.id == profileID,
-                          self?.tokenReportGeneration == generation else {
-                        return
-                    }
-                    self?.tokenReportTask = nil
+                guard self?.activeProfile?.id == profileID,
+                      self?.tokenReportGeneration == generation else {
+                    return
                 }
+                self?.tokenReportTask = nil
                 return
             }
 
-            do {
+            let report = try? await Task.detached(priority: .utility) {
                 let report = try tokenUsageSource.usageReport()
                 try tokenReportStore.save(report)
-                await MainActor.run {
-                    guard self?.activeProfile?.id == profileID,
-                          self?.tokenReportGeneration == generation else {
-                        return
-                    }
-                    self?.tokenReport = report
-                    self?.tokenReportTask = nil
-                    self?.render()
-                }
-            } catch {
-                await MainActor.run {
-                    guard self?.activeProfile?.id == profileID,
-                          self?.tokenReportGeneration == generation else {
-                        return
-                    }
-                    self?.tokenReportTask = nil
-                }
+                return report
+            }.value
+
+            guard self?.activeProfile?.id == profileID,
+                  self?.tokenReportGeneration == generation else {
+                return
+            }
+            self?.tokenReportTask = nil
+            if let report {
+                self?.tokenReport = report
+                self?.render()
             }
         }
     }
