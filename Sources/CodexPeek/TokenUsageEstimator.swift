@@ -129,66 +129,60 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     }
 
     private func sessionUsage(from fileURL: URL) throws -> SessionUsage? {
-        let headData = try readHead(of: fileURL, maxBytes: 256_000)
-        let tail = try readTail(of: fileURL, maxBytes: 160_000)
-        var tailLines = dataLines(tail.data)
-        if tail.startedMidFile, !tailLines.isEmpty { tailLines.removeFirst() }
-
+        let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
         let decoder = JSONDecoder()
-        let model = modelName(from: headData, decoder: decoder) ?? "Unknown model"
-        var latestUsage: TokenUsagePayload?
-        var latestTimestamp: Date?
-        for line in tailLines {
-            guard line.range(of: Data("\"token_count\"".utf8)) != nil,
-                  let entry = try? decoder.decode(TokenUsageLogEntry.self, from: line),
-                  entry.type == "event_msg",
-                  entry.payload?.type == "token_count",
-                  let usage = entry.payload?.info?.totalTokenUsage else { continue }
-            latestUsage = usage
-            latestTimestamp = entry.timestamp.flatMap(Formatters.parseISO8601)
+        let markers = ["\"session_meta\"", "\"turn_context\"", "\"token_count\"", "\"inter_agent_communication_metadata\""]
+            .map { Data($0.utf8) }
+        let fallbackTimestamp = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+        var buckets: [TokenUsageBucket] = []
+        var previousUsage = TokenUsagePayload.zero
+        var seenTotals = Set<TokenUsagePayload>()
+        var model = "Unknown model"
+        var sawSessionMetadata = false
+        var includeUsage = true
+        var lineStart = data.startIndex
+
+        while lineStart < data.endIndex {
+            let lineEnd = data[lineStart...].firstIndex(of: 10) ?? data.endIndex
+            let line = data[lineStart..<lineEnd]
+            defer {
+                lineStart = lineEnd < data.endIndex ? data.index(after: lineEnd) : data.endIndex
+            }
+            guard markers.contains(where: { line.range(of: $0) != nil }),
+                  let entry = try? decoder.decode(TokenUsageLogEntry.self, from: line) else { continue }
+
+            if entry.type == "session_meta", !sawSessionMetadata {
+                sawSessionMetadata = true
+                includeUsage = entry.payload?.multiAgentVersion != "v2" || entry.payload?.threadSource != "subagent"
+            } else if entry.type == "inter_agent_communication_metadata" {
+                includeUsage = true
+            } else if entry.type == "turn_context", let nextModel = entry.payload?.model, !nextModel.isEmpty {
+                model = nextModel
+            } else if entry.type == "event_msg",
+                      entry.payload?.type == "token_count",
+                      let info = entry.payload?.info,
+                      let usage = info.totalTokenUsage,
+                      usage.isConsistent,
+                      seenTotals.insert(usage).inserted {
+                let delta = usage.delta(since: previousUsage)
+                if delta != nil { previousUsage = usage }
+                guard includeUsage,
+                      let incrementalUsage = info.lastTokenUsage?.isConsistent == true ? info.lastTokenUsage : delta,
+                      incrementalUsage.totalTokens > 0 else { continue }
+
+                let timestamp = entry.timestamp.flatMap(Formatters.parseISO8601) ?? fallbackTimestamp
+                let interval = Date(timeIntervalSince1970: floor(timestamp.timeIntervalSince1970 / 900) * 900)
+                if let last = buckets.indices.last,
+                   buckets[last].startedAt == interval,
+                   buckets[last].model == model {
+                    buckets[last].usage.add(incrementalUsage)
+                } else {
+                    buckets.append(TokenUsageBucket(startedAt: interval, model: model, usage: incrementalUsage))
+                }
+            }
         }
 
-        guard let latestUsage else { return nil }
-        let modifiedAt = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        let timestamp = latestTimestamp ?? modifiedAt ?? .distantPast
-        let interval = Date(timeIntervalSince1970: floor(timestamp.timeIntervalSince1970 / 900) * 900)
-        return SessionUsage(buckets: [TokenUsageBucket(startedAt: interval, model: model, usage: latestUsage)])
-    }
-
-    private func modelName(from data: Data, decoder: JSONDecoder) -> String? {
-        guard let marker = data.range(of: Data("\"type\":\"turn_context\"".utf8)) else { return nil }
-        let lineStart = data[..<marker.lowerBound].lastIndex(of: 10).map { data.index(after: $0) } ?? data.startIndex
-        let lineEnd = data[marker.upperBound...].firstIndex(of: 10) ?? data.endIndex
-        guard let entry = try? decoder.decode(TokenUsageLogEntry.self, from: data.subdata(in: lineStart..<lineEnd)),
-              let model = entry.payload?.model,
-              !model.isEmpty else { return nil }
-        return model
-    }
-
-    private func dataLines(_ data: Data) -> [Data] {
-        var lines: [Data] = []
-        var start = data.startIndex
-        while let end = data[start...].firstIndex(of: 10) {
-            if start < end { lines.append(data.subdata(in: start..<end)) }
-            start = data.index(after: end)
-        }
-        if start < data.endIndex { lines.append(data.subdata(in: start..<data.endIndex)) }
-        return lines
-    }
-
-    private func readHead(of fileURL: URL, maxBytes: Int) throws -> Data {
-        let handle = try FileHandle(forReadingFrom: fileURL)
-        defer { try? handle.close() }
-        return try handle.read(upToCount: maxBytes) ?? Data()
-    }
-
-    private func readTail(of fileURL: URL, maxBytes: Int) throws -> (data: Data, startedMidFile: Bool) {
-        let handle = try FileHandle(forReadingFrom: fileURL)
-        defer { try? handle.close() }
-        let fileSize = try handle.seekToEnd()
-        let offset = max(0, Int64(fileSize) - Int64(maxBytes))
-        try handle.seek(toOffset: UInt64(offset))
-        return (try handle.readToEnd() ?? Data(), offset > 0)
+        return buckets.isEmpty ? nil : SessionUsage(buckets: buckets)
     }
 }
 
@@ -369,7 +363,7 @@ struct SessionLogFile {
 }
 
 struct TokenUsageSessionIndex: Codable {
-    static let schemaVersion = 2
+    static let schemaVersion = 4
 
     var schemaVersion = TokenUsageSessionIndex.schemaVersion
     var sessions: [String: IndexedSessionUsage] = [:]
@@ -422,7 +416,7 @@ struct SessionUsage: Codable {
     let buckets: [TokenUsageBucket]
 }
 
-struct TokenUsagePayload: Codable, Equatable {
+struct TokenUsagePayload: Codable, Hashable {
     let inputTokens: Int
     let cachedInputTokens: Int
     let outputTokens: Int
@@ -447,6 +441,23 @@ struct TokenUsagePayload: Codable, Equatable {
         )
     }
 
+    var isConsistent: Bool {
+        inputTokens >= 0 && cachedInputTokens >= 0 && outputTokens >= 0 && reasoningOutputTokens >= 0
+            && totalTokens == inputTokens + outputTokens
+    }
+
+    func delta(since previous: TokenUsagePayload) -> TokenUsagePayload? {
+        let delta = TokenUsagePayload(
+            inputTokens: inputTokens - previous.inputTokens,
+            cachedInputTokens: cachedInputTokens - previous.cachedInputTokens,
+            outputTokens: outputTokens - previous.outputTokens,
+            reasoningOutputTokens: reasoningOutputTokens - previous.reasoningOutputTokens,
+            totalTokens: totalTokens - previous.totalTokens
+        )
+        return [delta.inputTokens, delta.cachedInputTokens, delta.outputTokens, delta.reasoningOutputTokens, delta.totalTokens]
+            .contains(where: { $0 < 0 }) ? nil : delta
+    }
+
     private enum CodingKeys: String, CodingKey {
         case inputTokens = "input_tokens"
         case cachedInputTokens = "cached_input_tokens"
@@ -466,12 +477,23 @@ private struct TokenUsageLogPayload: Decodable {
     let type: String?
     let model: String?
     let info: TokenUsageInfoPayload?
+
+    let multiAgentVersion: String?
+    let threadSource: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case type, model, info
+        case multiAgentVersion = "multi_agent_version"
+        case threadSource = "thread_source"
+    }
 }
 
 private struct TokenUsageInfoPayload: Decodable {
     let totalTokenUsage: TokenUsagePayload?
+    let lastTokenUsage: TokenUsagePayload?
 
     private enum CodingKeys: String, CodingKey {
         case totalTokenUsage = "total_token_usage"
+        case lastTokenUsage = "last_token_usage"
     }
 }

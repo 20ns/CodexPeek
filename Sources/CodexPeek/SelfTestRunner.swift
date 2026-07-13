@@ -72,15 +72,38 @@ struct SelfTestRunner {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let first = formatter.string(from: Date().addingTimeInterval(-3600))
+        let first = formatter.string(from: Date().addingTimeInterval(-8 * 24 * 60 * 60))
         let second = formatter.string(from: Date().addingTimeInterval(-1800))
         let log = """
         {"timestamp":"\(first)","type":"turn_context","payload":{"model":"gpt-5.4"}}
         {"timestamp":"\(first)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":80,"cached_input_tokens":20,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":100}}}}
         {"timestamp":"\(first)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":120,"cached_input_tokens":30,"output_tokens":40,"reasoning_output_tokens":10,"total_tokens":160}}}}
         {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":180,"cached_input_tokens":50,"output_tokens":70,"reasoning_output_tokens":20,"total_tokens":250}}}}
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":180,"cached_input_tokens":50,"output_tokens":70,"reasoning_output_tokens":20,"total_tokens":250}}}}
         """
         try Data(log.utf8).write(to: root.appendingPathComponent("rollout.jsonl"))
+
+        let child = """
+        {"timestamp":"\(second)","type":"session_meta","payload":{"multi_agent_version":"v2","thread_source":"subagent"}}
+        {"timestamp":"\(first)","type":"turn_context","payload":{"model":"gpt-5.4"}}
+        {"timestamp":"\(first)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":120,"cached_input_tokens":30,"output_tokens":40,"reasoning_output_tokens":10,"total_tokens":160}}}}
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":180,"cached_input_tokens":50,"output_tokens":70,"reasoning_output_tokens":20,"total_tokens":250}}}}
+        {"timestamp":"\(second)","type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":220,"cached_input_tokens":60,"output_tokens":90,"reasoning_output_tokens":25,"total_tokens":310}}}}
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":290,"cached_input_tokens":80,"output_tokens":110,"reasoning_output_tokens":30,"total_tokens":400}}}}
+        """
+        try Data(child.utf8).write(to: root.appendingPathComponent("child.jsonl"))
+
+        let parallel = """
+        {"timestamp":"\(second)","type":"turn_context","payload":{"model":"gpt-5.4"}}
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":80,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":100},"last_token_usage":{"input_tokens":80,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":100}}}}
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":80,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":100},"last_token_usage":{"input_tokens":80,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":100}}}}
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":60,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":80},"last_token_usage":{"input_tokens":60,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":80}}}}
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":120,"cached_input_tokens":0,"output_tokens":30,"reasoning_output_tokens":0,"total_tokens":150},"last_token_usage":{"input_tokens":40,"cached_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":50}}}}
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":90,"cached_input_tokens":0,"output_tokens":30,"reasoning_output_tokens":0,"total_tokens":120},"last_token_usage":{"input_tokens":30,"cached_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":40}}}}
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":258400}}}}
+        """
+        try Data(parallel.utf8).write(to: root.appendingPathComponent("parallel.jsonl"))
 
         let report = try CodexTokenUsageSource(sessionsRootURL: root).usageReport()
         let buckets = try unwrap(report.history?.buckets, "token history missing")
@@ -88,9 +111,10 @@ struct SelfTestRunner {
             from: UsageHistoryAnalytics.dailyUsage(from: buckets, days: 2)
         ).map { ($0.model, $0.usage.totalTokens) })
 
-        try expect(report.allTime.totalTokens == 250, "session token history should use the latest cumulative total")
-        try expect(report.allTime.sessionCount == 1, "history should retain session counts")
-        try expect(totals["gpt-5.4"] == 250, "model token history mismatch")
+        try expect(report.allTime.totalTokens == 670, "v2 sub-agent history should exclude its copied parent usage")
+        try expect(report.week.totalTokens == 510, "recent history should count unique request deltas")
+        try expect(report.allTime.sessionCount == 3, "history should retain session counts")
+        try expect(totals["gpt-5.4"] == 510, "model token history mismatch")
     }
 
     private func testPlanUsageHistoryStore() throws {
