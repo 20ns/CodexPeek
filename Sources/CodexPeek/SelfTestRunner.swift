@@ -72,7 +72,7 @@ struct SelfTestRunner {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let first = formatter.string(from: Date().addingTimeInterval(-8 * 24 * 60 * 60))
+        let first = formatter.string(from: Date().addingTimeInterval(-31 * 24 * 60 * 60))
         let second = formatter.string(from: Date().addingTimeInterval(-1800))
         let log = """
         {"timestamp":"\(first)","type":"turn_context","payload":{"model":"gpt-5.4"}}
@@ -113,6 +113,7 @@ struct SelfTestRunner {
 
         try expect(report.allTime.totalTokens == 670, "v2 sub-agent history should exclude its copied parent usage")
         try expect(report.week.totalTokens == 510, "recent history should count unique request deltas")
+        try expect(report.month.totalTokens == 510, "30-day history should exclude older usage")
         try expect(report.allTime.sessionCount == 3, "history should retain session counts")
         try expect(totals["gpt-5.4"] == 510, "model token history mismatch")
     }

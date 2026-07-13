@@ -35,14 +35,14 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     func usageReport() throws -> TokenUsageReport {
         let now = Date()
         let weekCutoff = now.addingTimeInterval(-7 * 24 * 60 * 60)
-        let monthCutoff = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: now)) ?? weekCutoff
+        let last30DaysCutoff = now.addingTimeInterval(-30 * 24 * 60 * 60)
         let files = try sessionLogFiles()
         var index = (try? indexStore?.load()) ?? TokenUsageSessionIndex()
         let currentPaths = Set(files.map(\.path))
         index.sessions = index.sessions.filter { currentPaths.contains($0.key) }
         var report = TokenUsageReport.empty
         var weeklyTotalsByModel: [String: Int] = [:]
-        var monthlyTotalsByModel: [String: Int] = [:]
+        var last30DaysTotalsByModel: [String: Int] = [:]
         var allTimeTotalsByModel: [String: Int] = [:]
         var allBuckets: [TokenUsageBucket] = []
 
@@ -63,12 +63,12 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
 
             allBuckets.append(contentsOf: session.buckets)
             add(session.buckets, since: nil, to: &report.allTime, totalsByModel: &allTimeTotalsByModel)
-            add(session.buckets, since: monthCutoff, to: &report.month, totalsByModel: &monthlyTotalsByModel)
+            add(session.buckets, since: last30DaysCutoff, to: &report.month, totalsByModel: &last30DaysTotalsByModel)
             add(session.buckets, since: weekCutoff, to: &report.week, totalsByModel: &weeklyTotalsByModel)
         }
 
         report.week.topModel = weeklyTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
-        report.month.topModel = monthlyTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
+        report.month.topModel = last30DaysTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
         report.allTime.topModel = allTimeTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
         report.generatedAt = now
         report.history = TokenUsageHistory(buckets: allBuckets.sorted { $0.startedAt < $1.startedAt })

@@ -322,10 +322,10 @@ final class TokenCostMenuItemView: NSView {
         }
 
         let weekCost = UIFormatters.costString(report.week.estimatedCostUSD)
-        let monthCost = UIFormatters.costString(report.month.estimatedCostUSD)
+        let last30DaysCost = UIFormatters.costString(report.month.estimatedCostUSD)
         let allTimeCost = UIFormatters.costString(report.allTime.estimatedCostUSD)
 
-        detailField.stringValue = "7d \(weekCost) • month \(monthCost) • all-time \(allTimeCost)"
+        detailField.stringValue = "7d \(weekCost) • 30d \(last30DaysCost) • all-time \(allTimeCost)"
         modelField.stringValue = ""
         modelField.isHidden = true
     }

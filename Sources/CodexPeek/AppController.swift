@@ -1028,7 +1028,7 @@ final class AppController: NSObject, NSMenuDelegate {
         let sparkWeekly = snapshot?.spark?.secondary.map { "\($0.usedPercent)%" } ?? "unavailable"
         let weeklyTokenCost = tokenReport.map { UIFormatters.costString($0.week.estimatedCostUSD) } ?? "unavailable"
         let weeklyTokenTotal = tokenReport.map { UIFormatters.compactTokenString($0.week.totalTokens) } ?? "unavailable"
-        let monthlyTokenCost = tokenReport.map { UIFormatters.costString($0.month.estimatedCostUSD) } ?? "unavailable"
+        let last30DaysTokenCost = tokenReport.map { UIFormatters.costString($0.month.estimatedCostUSD) } ?? "unavailable"
         let allTimeTokenCost = tokenReport.map { UIFormatters.costString($0.allTime.estimatedCostUSD) } ?? "unavailable"
         let updatedAt = snapshot.map { UIFormatters.usageUpdatedString(from: $0.lastUpdatedAt) } ?? "never"
         let profileLabel = activeProfile?.displayName ?? "unknown"
@@ -1049,7 +1049,7 @@ final class AppController: NSObject, NSMenuDelegate {
             "Spark weekly usage: \(sparkWeekly)",
             "7-day token usage: \(weeklyTokenTotal)",
             "7-day API-equivalent estimate: \(weeklyTokenCost)",
-            "Month API-equivalent estimate: \(monthlyTokenCost)",
+            "30-day API-equivalent estimate: \(last30DaysTokenCost)",
             "All-time API-equivalent estimate: \(allTimeTokenCost)",
             "Last updated: \(updatedAt)"
         ].joined(separator: "\n")
