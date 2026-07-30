@@ -15,6 +15,14 @@ protocol TokenUsageSessionIndexStoring: Sendable {
 }
 
 final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
+    private static let relevantLogMarkers = [
+        "\"session_meta\"",
+        "\"turn_context\"",
+        "\"token_count\"",
+        "\"thread_settings_applied\"",
+        "\"inter_agent_communication_metadata\""
+    ].map { Data($0.utf8) }
+
     private let sessionsRootURL: URL
     private let fileManager: FileManager
     private let pricingCatalog: TokenPricingCatalog
@@ -36,9 +44,11 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         let now = Date()
         let weekCutoff = now.addingTimeInterval(-7 * 24 * 60 * 60)
         let last30DaysCutoff = now.addingTimeInterval(-30 * 24 * 60 * 60)
+        let historyCutoff = now.addingTimeInterval(-90 * 24 * 60 * 60)
         let files = try sessionLogFiles()
         var index = (try? indexStore?.load()) ?? TokenUsageSessionIndex()
         let currentPaths = Set(files.map(\.path))
+        var indexChanged = Set(index.sessions.keys) != currentPaths
         index.sessions = index.sessions.filter { currentPaths.contains($0.key) }
         var report = TokenUsageReport.empty
         var weeklyTotalsByModel: [String: Int] = [:]
@@ -52,16 +62,17 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
                 session = cached.session
             } else {
                 session = try autoreleasepool(invoking: {
-                    try sessionUsage(from: file.url)
+                    try sessionUsage(from: file.url, fallbackTimestamp: file.modifiedAt)
                 })
                 index.sessions[file.path] = IndexedSessionUsage(file: file, session: session)
+                indexChanged = true
             }
 
             guard let session else {
                 continue
             }
 
-            allBuckets.append(contentsOf: session.buckets)
+            allBuckets.append(contentsOf: session.buckets.lazy.filter { $0.startedAt >= historyCutoff })
             add(session.buckets, since: nil, to: &report.allTime, totalsByModel: &allTimeTotalsByModel)
             add(session.buckets, since: last30DaysCutoff, to: &report.month, totalsByModel: &last30DaysTotalsByModel)
             add(session.buckets, since: weekCutoff, to: &report.week, totalsByModel: &weeklyTotalsByModel)
@@ -71,10 +82,10 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         report.month.topModel = last30DaysTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
         report.allTime.topModel = allTimeTotalsByModel.max { lhs, rhs in lhs.value < rhs.value }?.key
         report.generatedAt = now
-        report.history = TokenUsageHistory(buckets: allBuckets
-            .filter { $0.startedAt >= last30DaysCutoff }
-            .sorted { $0.startedAt < $1.startedAt })
-        try? indexStore?.save(index)
+        report.history = TokenUsageHistory(buckets: allBuckets.sorted { $0.startedAt < $1.startedAt })
+        if indexChanged {
+            try? indexStore?.save(index)
+        }
         return report
     }
 
@@ -107,11 +118,12 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         to summary: inout TokenUsageSummary,
         totalsByModel: inout [String: Int]
     ) {
-        let selected = buckets.filter { cutoff == nil || $0.startedAt >= cutoff! }
-        guard !selected.isEmpty else { return }
+        var selectedAny = false
         var priced = false
 
-        for bucket in selected {
+        for bucket in buckets {
+            if let cutoff, bucket.startedAt < cutoff { continue }
+            selectedAny = true
             summary.inputTokens += bucket.usage.inputTokens
             summary.cachedInputTokens += bucket.usage.cachedInputTokens
             summary.outputTokens += bucket.usage.outputTokens
@@ -119,27 +131,30 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
             summary.totalTokens += bucket.usage.totalTokens
             totalsByModel[pricingCatalog.displayModelName(for: bucket.model), default: 0] += bucket.usage.totalTokens
 
-            guard let cost = pricingCatalog.estimateCost(for: bucket.model, usage: bucket.usage) else { continue }
+            guard let cost = pricingCatalog.estimateCost(
+                for: bucket.model,
+                usage: bucket.usage,
+                serviceTier: bucket.serviceTier
+            ) else { continue }
             summary.estimatedCostUSD += cost.total
             summary.uncachedInputCostUSD += cost.uncachedInput
             summary.cachedInputCostUSD += cost.cachedInput
             summary.outputCostUSD += cost.output
             priced = true
         }
+        guard selectedAny else { return }
         summary.sessionCount += 1
         summary.pricedSessionCount += priced ? 1 : 0
     }
 
-    private func sessionUsage(from fileURL: URL) throws -> SessionUsage? {
+    private func sessionUsage(from fileURL: URL, fallbackTimestamp: Date) throws -> SessionUsage? {
         let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
         let decoder = JSONDecoder()
-        let markers = ["\"session_meta\"", "\"turn_context\"", "\"token_count\"", "\"inter_agent_communication_metadata\""]
-            .map { Data($0.utf8) }
-        let fallbackTimestamp = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
         var buckets: [TokenUsageBucket] = []
         var previousUsage = TokenUsagePayload.zero
         var seenTotals = Set<TokenUsagePayload>()
         var model = "Unknown model"
+        var serviceTier: String?
         var sawSessionMetadata = false
         var includeUsage = true
         var lineStart = data.startIndex
@@ -150,7 +165,7 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
             defer {
                 lineStart = lineEnd < data.endIndex ? data.index(after: lineEnd) : data.endIndex
             }
-            guard markers.contains(where: { line.range(of: $0) != nil }),
+            guard Self.relevantLogMarkers.contains(where: { line.range(of: $0) != nil }),
                   let entry = try? decoder.decode(TokenUsageLogEntry.self, from: line) else { continue }
 
             if entry.type == "session_meta", !sawSessionMetadata {
@@ -158,6 +173,8 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
                 includeUsage = entry.payload?.multiAgentVersion != "v2" || entry.payload?.threadSource != "subagent"
             } else if entry.type == "inter_agent_communication_metadata" {
                 includeUsage = true
+            } else if entry.type == "event_msg", entry.payload?.type == "thread_settings_applied" {
+                serviceTier = entry.payload?.threadSettings?.serviceTier
             } else if entry.type == "turn_context", let nextModel = entry.payload?.model, !nextModel.isEmpty {
                 model = nextModel
             } else if entry.type == "event_msg",
@@ -174,12 +191,21 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
 
                 let timestamp = entry.timestamp.flatMap(Formatters.parseISO8601) ?? fallbackTimestamp
                 let interval = Date(timeIntervalSince1970: floor(timestamp.timeIntervalSince1970 / 900) * 900)
+                let usesChatGPTCredits = entry.payload?.rateLimits.map { $0.planType != nil }
                 if let last = buckets.indices.last,
                    buckets[last].startedAt == interval,
-                   buckets[last].model == model {
+                   buckets[last].model == model,
+                   buckets[last].serviceTier == serviceTier,
+                   buckets[last].usesChatGPTCredits == usesChatGPTCredits {
                     buckets[last].usage.add(incrementalUsage)
                 } else {
-                    buckets.append(TokenUsageBucket(startedAt: interval, model: model, usage: incrementalUsage))
+                    buckets.append(TokenUsageBucket(
+                        startedAt: interval,
+                        model: model,
+                        serviceTier: serviceTier,
+                        usesChatGPTCredits: usesChatGPTCredits,
+                        usage: incrementalUsage
+                    ))
                 }
             }
         }
@@ -200,7 +226,6 @@ final class TokenUsageSessionIndexStore: TokenUsageSessionIndexStoring, @uncheck
     ) {
         self.cacheURL = cacheURL
         self.fileManager = fileManager
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     }
 
     func load() throws -> TokenUsageSessionIndex? {
@@ -259,7 +284,6 @@ final class TokenUsageReportCacheStore: TokenUsageReportStoring, @unchecked Send
     ) {
         self.cacheURL = cacheURL
         self.fileManager = fileManager
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     }
 
     func load() throws -> TokenUsageReport? {
@@ -296,6 +320,8 @@ struct TokenPricingCatalog: Sendable {
         let cachedInputPerMillion: Decimal
         let outputPerMillion: Decimal
         let displayName: String
+        var priorityMultiplier: Decimal = 1
+        var fastCreditMultiplier: Decimal? = nil
     }
 
     struct Cost: Sendable {
@@ -309,16 +335,16 @@ struct TokenPricingCatalog: Sendable {
     }
 
     static let standard = TokenPricingCatalog(prices: [
-        "gpt-5.6-sol": Price(inputPerMillion: 5, cachedInputPerMillion: 0.5, outputPerMillion: 30, displayName: "GPT-5.6 Sol"),
-        "gpt-5.6-terra": Price(inputPerMillion: 2.5, cachedInputPerMillion: 0.25, outputPerMillion: 15, displayName: "GPT-5.6 Terra"),
-        "gpt-5.6-luna": Price(inputPerMillion: 1, cachedInputPerMillion: 0.1, outputPerMillion: 6, displayName: "GPT-5.6 Luna"),
-        "gpt-5.5": Price(inputPerMillion: 5, cachedInputPerMillion: 0.5, outputPerMillion: 30, displayName: "GPT-5.5"),
+        "gpt-5.6-sol": Price(inputPerMillion: 5, cachedInputPerMillion: 0.5, outputPerMillion: 30, displayName: "GPT-5.6 Sol", priorityMultiplier: 2, fastCreditMultiplier: 2.5),
+        "gpt-5.6-terra": Price(inputPerMillion: 2.5, cachedInputPerMillion: 0.25, outputPerMillion: 15, displayName: "GPT-5.6 Terra", priorityMultiplier: 2, fastCreditMultiplier: 2.5),
+        "gpt-5.6-luna": Price(inputPerMillion: 1, cachedInputPerMillion: 0.1, outputPerMillion: 6, displayName: "GPT-5.6 Luna", priorityMultiplier: 2, fastCreditMultiplier: 2.5),
+        "gpt-5.5": Price(inputPerMillion: 5, cachedInputPerMillion: 0.5, outputPerMillion: 30, displayName: "GPT-5.5", priorityMultiplier: 2.5, fastCreditMultiplier: 2.5),
         "gpt-5.5-pro": Price(inputPerMillion: 30, cachedInputPerMillion: 30, outputPerMillion: 180, displayName: "GPT-5.5 Pro"),
-        "gpt-5.4": Price(inputPerMillion: 2.5, cachedInputPerMillion: 0.25, outputPerMillion: 15, displayName: "GPT-5.4"),
+        "gpt-5.4": Price(inputPerMillion: 2.5, cachedInputPerMillion: 0.25, outputPerMillion: 15, displayName: "GPT-5.4", priorityMultiplier: 2, fastCreditMultiplier: 2),
         "gpt-5.4-pro": Price(inputPerMillion: 30, cachedInputPerMillion: 30, outputPerMillion: 180, displayName: "GPT-5.4 Pro"),
-        "gpt-5.4-mini": Price(inputPerMillion: 0.75, cachedInputPerMillion: 0.075, outputPerMillion: 4.5, displayName: "GPT-5.4 Mini"),
+        "gpt-5.4-mini": Price(inputPerMillion: 0.75, cachedInputPerMillion: 0.075, outputPerMillion: 4.5, displayName: "GPT-5.4 Mini", priorityMultiplier: 2),
         "gpt-5.3-codex": Price(inputPerMillion: 1.75, cachedInputPerMillion: 0.175, outputPerMillion: 14, displayName: "GPT-5.3 Codex"),
-        "gpt-5.2": Price(inputPerMillion: 1.75, cachedInputPerMillion: 0.175, outputPerMillion: 14, displayName: "GPT-5.2"),
+        "gpt-5.2": Price(inputPerMillion: 1.75, cachedInputPerMillion: 0.175, outputPerMillion: 14, displayName: "GPT-5.2", priorityMultiplier: 2),
         "gpt-5.2-codex": Price(inputPerMillion: 1.75, cachedInputPerMillion: 0.175, outputPerMillion: 14, displayName: "GPT-5.2 Codex")
     ])
 
@@ -331,16 +357,17 @@ struct TokenPricingCatalog: Sendable {
             .sorted { $0.prefix.count > $1.prefix.count }
     }
 
-    func estimateCost(for model: String, usage: TokenUsagePayload) -> Cost? {
+    func estimateCost(for model: String, usage: TokenUsagePayload, serviceTier: String? = nil) -> Cost? {
         guard let price = price(for: model) else {
             return nil
         }
 
+        let multiplier = serviceTier?.lowercased() == "priority" ? price.priorityMultiplier : 1
         let cachedInput = max(0, usage.cachedInputTokens)
         let uncachedInput = max(0, usage.inputTokens - cachedInput)
-        let inputCost = Decimal(uncachedInput) / 1_000_000 * price.inputPerMillion
-        let cachedCost = Decimal(cachedInput) / 1_000_000 * price.cachedInputPerMillion
-        let outputCost = Decimal(usage.outputTokens) / 1_000_000 * price.outputPerMillion
+        let inputCost = Decimal(uncachedInput) / 1_000_000 * price.inputPerMillion * multiplier
+        let cachedCost = Decimal(cachedInput) / 1_000_000 * price.cachedInputPerMillion * multiplier
+        let outputCost = Decimal(usage.outputTokens) / 1_000_000 * price.outputPerMillion * multiplier
         return Cost(
             uncachedInput: inputCost,
             cachedInput: cachedCost,
@@ -348,14 +375,19 @@ struct TokenPricingCatalog: Sendable {
         )
     }
 
-    func estimateCacheSavings(for model: String, usage: TokenUsagePayload) -> Decimal? {
+    func estimateCacheSavings(for model: String, usage: TokenUsagePayload, serviceTier: String? = nil) -> Decimal? {
         guard let price = price(for: model) else { return nil }
         return Decimal(max(0, usage.cachedInputTokens)) / 1_000_000
             * (price.inputPerMillion - price.cachedInputPerMillion)
+            * (serviceTier?.lowercased() == "priority" ? price.priorityMultiplier : 1)
     }
 
     func displayModelName(for model: String) -> String {
         price(for: model)?.displayName ?? model
+    }
+
+    func fastCreditMultiplier(for model: String) -> Decimal? {
+        price(for: model)?.fastCreditMultiplier
     }
 
     private func price(for model: String) -> Price? {
@@ -376,7 +408,7 @@ struct SessionLogFile {
 }
 
 struct TokenUsageSessionIndex: Codable {
-    static let schemaVersion = 4
+    static let schemaVersion = 6
 
     var schemaVersion = TokenUsageSessionIndex.schemaVersion
     var sessions: [String: IndexedSessionUsage] = [:]
@@ -490,14 +522,34 @@ private struct TokenUsageLogPayload: Decodable {
     let type: String?
     let model: String?
     let info: TokenUsageInfoPayload?
+    let threadSettings: TokenUsageThreadSettings?
+    let rateLimits: TokenUsageRateLimits?
 
     let multiAgentVersion: String?
     let threadSource: String?
 
     private enum CodingKeys: String, CodingKey {
         case type, model, info
+        case threadSettings = "thread_settings"
+        case rateLimits = "rate_limits"
         case multiAgentVersion = "multi_agent_version"
         case threadSource = "thread_source"
+    }
+}
+
+private struct TokenUsageRateLimits: Decodable {
+    let planType: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case planType = "plan_type"
+    }
+}
+
+private struct TokenUsageThreadSettings: Decodable {
+    let serviceTier: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case serviceTier = "service_tier"
     }
 }
 

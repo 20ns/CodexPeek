@@ -48,6 +48,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private var tokenRefreshTimer: Timer?
     private var refreshTask: Task<Void, Never>?
     private var tokenReportTask: Task<Void, Never>?
+    private var pendingTokenReportRefresh = false
     private var tokenReportGeneration = 0
     private var snapshot: CodexUsageSnapshot?
     private var tokenReport: TokenUsageReport?
@@ -565,7 +566,7 @@ final class AppController: NSObject, NSMenuDelegate {
         secondaryUsageView.update(title: "Weekly window", window: snapshot?.secondary)
         sparkUsageView.update(snapshot: snapshot?.spark)
         sparkUsageItem.isHidden = snapshot?.spark == nil
-        tokenCostView.update(report: tokenReport)
+        tokenCostView.update(report: tokenReport, isRefreshing: tokenReportTask != nil)
         statusView.update(snapshot: snapshot, refreshState: refreshState, accountStatus: accountStatusMessage())
         usageHistoryWindowController?.update(report: tokenReport, planHistory: planHistory, snapshot: snapshot)
         renderAccountsMenu()
@@ -777,6 +778,7 @@ final class AppController: NSObject, NSMenuDelegate {
         tokenReportGeneration += 1
         tokenReportTask?.cancel()
         tokenReportTask = nil
+        pendingTokenReportRefresh = false
         activeProfile = profile
         repository = makeRepository(for: profile)
         tokenUsageSource = CodexTokenUsageSource(
@@ -844,12 +846,12 @@ final class AppController: NSObject, NSMenuDelegate {
             return
         }
 
+        if tokenReportTask != nil {
+            pendingTokenReportRefresh = pendingTokenReportRefresh || force
+            return
+        }
         if force {
             tokenReportGeneration += 1
-            tokenReportTask?.cancel()
-            tokenReportTask = nil
-        } else if tokenReportTask != nil {
-            return
         }
 
         if !force,
@@ -888,9 +890,14 @@ final class AppController: NSObject, NSMenuDelegate {
             self?.tokenReportTask = nil
             if let report {
                 self?.tokenReport = report
-                self?.render()
+            }
+            self?.render()
+            if self?.pendingTokenReportRefresh == true {
+                self?.pendingTokenReportRefresh = false
+                self?.refreshTokenReportIfNeeded(force: true, delay: 0)
             }
         }
+        render()
     }
 
     private func codexEnvironment(for profile: AccountProfile) -> [String: String] {

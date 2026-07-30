@@ -12,6 +12,7 @@ struct SelfTestRunner {
         try testFutureCodexRateLimitSelector()
         try testCurrentModelPricing()
         try testTokenUsageHistory()
+        try testUsageComparisons()
         try testPlanUsageHistoryStore()
         try testSessionLogFallback()
         try testProfileScopedCachePaths()
@@ -63,6 +64,12 @@ struct SelfTestRunner {
         let usage = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 1_000_000, reasoningOutputTokens: 0, totalTokens: 2_000_000)
         let cost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-sol", usage: usage), "GPT-5.6 Sol pricing missing")
         try expect(cost.total == 35, "GPT-5.6 Sol pricing mismatch")
+        let priorityCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-sol", usage: usage, serviceTier: "priority"), "GPT-5.6 priority pricing missing")
+        try expect(priorityCost.total == 70, "GPT-5.6 priority pricing mismatch")
+        let gpt55PriorityCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.5", usage: usage, serviceTier: "priority"), "GPT-5.5 priority pricing missing")
+        try expect(gpt55PriorityCost.total == 87.5, "GPT-5.5 priority pricing mismatch")
+        try expect(TokenPricingCatalog.standard.fastCreditMultiplier(for: "gpt-5.6-sol") == 2.5, "GPT-5.6 Fast credit multiplier mismatch")
+        try expect(TokenPricingCatalog.standard.fastCreditMultiplier(for: "gpt-5.4") == 2, "GPT-5.4 Fast credit multiplier mismatch")
         let cachedUsage = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 1_000_000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1_000_000)
         try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-5.6-sol", usage: cachedUsage) == 4.5, "cache savings mismatch")
         try expect(TokenPricingCatalog.standard.displayModelName(for: "gpt-5.6-terra-2026") == "GPT-5.6 Terra", "GPT-5.6 Terra prefix pricing missing")
@@ -81,7 +88,8 @@ struct SelfTestRunner {
         {"timestamp":"\(first)","type":"turn_context","payload":{"model":"gpt-5.4"}}
         {"timestamp":"\(first)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":80,"cached_input_tokens":20,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":100}}}}
         {"timestamp":"\(first)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":120,"cached_input_tokens":30,"output_tokens":40,"reasoning_output_tokens":10,"total_tokens":160}}}}
-        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":180,"cached_input_tokens":50,"output_tokens":70,"reasoning_output_tokens":20,"total_tokens":250}}}}
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":"priority"}}}
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":180,"cached_input_tokens":50,"output_tokens":70,"reasoning_output_tokens":20,"total_tokens":250}},"rate_limits":{"plan_type":"plus"}}}
         {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":180,"cached_input_tokens":50,"output_tokens":70,"reasoning_output_tokens":20,"total_tokens":250}}}}
         """
         try Data(log.utf8).write(to: root.appendingPathComponent("rollout.jsonl"))
@@ -108,18 +116,101 @@ struct SelfTestRunner {
         """
         try Data(parallel.utf8).write(to: root.appendingPathComponent("parallel.jsonl"))
 
-        let report = try CodexTokenUsageSource(sessionsRootURL: root).usageReport()
+        let indexStore = InMemoryTokenUsageIndexStore()
+        let source = CodexTokenUsageSource(sessionsRootURL: root, indexStore: indexStore)
+        let report = try source.usageReport()
         let buckets = try unwrap(report.history?.buckets, "token history missing")
-        let totals = Dictionary(uniqueKeysWithValues: UsageHistoryAnalytics.modelTotals(
-            from: UsageHistoryAnalytics.dailyUsage(from: buckets, days: 2)
-        ).map { ($0.model, $0.usage.totalTokens) })
+        let daily = UsageHistoryAnalytics.dailyUsage(from: buckets, days: 2)
+        let modelSummaries = UsageHistoryAnalytics.modelTotals(from: daily)
+        let totals = Dictionary(uniqueKeysWithValues: modelSummaries.map { ($0.model, $0.usage.totalTokens) })
 
         try expect(report.allTime.totalTokens == 670, "v2 sub-agent history should exclude its copied parent usage")
         try expect(report.week.totalTokens == 510, "recent history should count unique request deltas")
         try expect(report.month.totalTokens == 510, "30-day history should exclude older usage")
         try expect(report.allTime.sessionCount == 3, "history should retain session counts")
-        try expect(buckets.allSatisfy { $0.startedAt >= Date().addingTimeInterval(-30 * 24 * 60 * 60) }, "chart history should retain only 30 days")
+        try expect(buckets.allSatisfy { $0.startedAt >= Date().addingTimeInterval(-90 * 24 * 60 * 60) }, "chart history should retain only 90 days")
+        try expect(buckets.contains { $0.startedAt < Date().addingTimeInterval(-30 * 24 * 60 * 60) }, "chart history should retain prior-month comparison data")
         try expect(totals["gpt-5.4"] == 510, "model token history mismatch")
+        try expect(buckets.contains { $0.serviceTier == "priority" && $0.usesChatGPTCredits == true && $0.usage.totalTokens == 90 }, "Fast usage metadata was not retained")
+        try expect(daily.reduce(0) { $0 + $1.priorityTokensByModel.values.reduce(0, +) } == 90, "Fast/priority token history mismatch")
+        try expect(daily.reduce(0) { $0 + $1.fastTokensByModel.values.reduce(0, +) } == 90, "Fast token history mismatch")
+        try expect(modelSummaries.first { $0.model == "gpt-5.4" }?.cost == report.week.estimatedCostUSD, "history should preserve mixed service-tier pricing")
+        try expect(indexStore.saveCount == 1, "session index should be saved after parsing")
+        _ = try source.usageReport()
+        try expect(indexStore.saveCount == 1, "unchanged session index should not be rewritten")
+
+        let updatedParallel = parallel + """
+
+        {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":160,"cached_input_tokens":0,"output_tokens":40,"reasoning_output_tokens":0,"total_tokens":200},"last_token_usage":{"input_tokens":40,"cached_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":50}}}}
+        """
+        try Data(updatedParallel.utf8).write(to: root.appendingPathComponent("parallel.jsonl"))
+        let refreshed = try source.usageReport()
+        try expect(refreshed.week.totalTokens == 560, "changed session logs should refresh token totals")
+        try expect(refreshed.week.estimatedCostUSD > report.week.estimatedCostUSD, "changed session logs should refresh API-equivalent cost")
+        try expect(indexStore.saveCount == 2, "changed session index should be rewritten")
+    }
+
+    private func testUsageComparisons() throws {
+        var calendar = Calendar(identifier: .iso8601)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = try unwrap(
+            calendar.date(from: DateComponents(year: 2026, month: 7, day: 29, hour: 12)),
+            "comparison date missing"
+        )
+        let usage: (Int) -> TokenUsagePayload = {
+            TokenUsagePayload(
+                inputTokens: $0,
+                cachedInputTokens: $0 / 2,
+                outputTokens: 0,
+                reasoningOutputTokens: 0,
+                totalTokens: $0
+            )
+        }
+        let date: (Int, Int, Int) -> Date = { year, month, day in
+            calendar.date(from: DateComponents(year: year, month: month, day: day, hour: 10))!
+        }
+        var buckets = [
+            TokenUsageBucket(startedAt: date(2026, 5, 31), model: "gpt-5.4", usage: usage(0)),
+            TokenUsageBucket(startedAt: date(2026, 6, 5), model: "gpt-5.4", usage: usage(200)),
+            TokenUsageBucket(startedAt: date(2026, 7, 5), model: "gpt-5.6-sol", usage: usage(300))
+        ]
+        let month = try unwrap(
+            UsageHistoryAnalytics.calendarComparison(from: buckets, component: .month, now: now, calendar: calendar),
+            "month comparison missing"
+        )
+        try expect(month.tokenChangePercent == 50, "equal-elapsed month comparison mismatch")
+        try expect(month.activeDayChangePercent == 50, "active-day intensity comparison mismatch")
+        try expect(month.current.contextLeverage == 2, "context leverage mismatch")
+
+        let firstReset = date(2026, 6, 30)
+        let secondReset = date(2026, 7, 30)
+        let firstStart = date(2026, 6, 24)
+        let firstEnd = date(2026, 6, 26)
+        let secondStart = date(2026, 7, 24)
+        let secondEnd = date(2026, 7, 26)
+        buckets += [
+            TokenUsageBucket(startedAt: firstStart.addingTimeInterval(60), model: "gpt-5.4", usesChatGPTCredits: true, usage: usage(1_000)),
+            TokenUsageBucket(startedAt: secondStart.addingTimeInterval(60), model: "gpt-5.4", usesChatGPTCredits: true, usage: usage(1_500))
+        ]
+        let history = PlanUsageHistory(samples: [
+            PlanUsageSample(recordedAt: firstStart, secondaryPercent: 10, secondaryResetsAt: firstReset),
+            PlanUsageSample(recordedAt: firstEnd, secondaryPercent: 20, secondaryResetsAt: firstReset),
+            PlanUsageSample(recordedAt: secondStart, secondaryPercent: 5, secondaryResetsAt: secondReset),
+            PlanUsageSample(recordedAt: secondEnd, secondaryPercent: 15, secondaryResetsAt: secondReset)
+        ])
+        let yield = UsageHistoryAnalytics.allowanceYield(from: buckets, history: history)
+        try expect(yield.current?.tokensPerPoint == 150, "current allowance yield mismatch")
+        try expect(yield.previous?.tokensPerPoint == 100, "previous allowance yield mismatch")
+        try expect(yield.changePercent == 50, "allowance yield comparison mismatch")
+
+        var snapshot = sampleSnapshot(source: .live, stale: false, email: nil, lastUpdatedAt: now)
+        snapshot.secondary = RateLimitWindowSnapshot(
+            usedPercent: 50,
+            windowDurationMins: 10_080,
+            resetsAt: now.addingTimeInterval(3.5 * 24 * 60 * 60)
+        )
+        let pace = try unwrap(UsageHistoryAnalytics.planPace(snapshot: snapshot, now: now), "plan pace missing")
+        try expect(abs(pace.multiplier - 1) < 0.001 && pace.projectedPercent == 100, "plan pace mismatch")
     }
 
     private func testPlanUsageHistoryStore() throws {
@@ -918,6 +1009,20 @@ private final class InMemoryStore: UsageSnapshotStoring, @unchecked Sendable {
 
     func save(_ snapshot: CodexUsageSnapshot) throws {
         self.snapshot = snapshot
+    }
+}
+
+private final class InMemoryTokenUsageIndexStore: TokenUsageSessionIndexStoring, @unchecked Sendable {
+    private var index: TokenUsageSessionIndex?
+    private(set) var saveCount = 0
+
+    func load() throws -> TokenUsageSessionIndex? {
+        index
+    }
+
+    func save(_ index: TokenUsageSessionIndex) throws {
+        self.index = index
+        saveCount += 1
     }
 }
 

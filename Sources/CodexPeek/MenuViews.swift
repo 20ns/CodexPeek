@@ -311,8 +311,8 @@ final class TokenCostMenuItemView: NSView {
         nil
     }
 
-    func update(report: TokenUsageReport?) {
-        titleField.stringValue = "API-equivalent estimate"
+    func update(report: TokenUsageReport?, isRefreshing: Bool = false) {
+        titleField.stringValue = "API-equivalent estimate\(isRefreshing ? " • refreshing" : "")"
 
         guard let report, report.hasUsage else {
             detailField.stringValue = "Calculating in background"

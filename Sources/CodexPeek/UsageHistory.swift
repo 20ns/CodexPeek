@@ -7,6 +7,8 @@ struct TokenUsageHistory: Codable, Equatable {
 struct TokenUsageBucket: Codable, Equatable {
     var startedAt: Date
     var model: String
+    var serviceTier: String? = nil
+    var usesChatGPTCredits: Bool? = nil
     var usage: TokenUsagePayload
 }
 
@@ -83,10 +85,78 @@ final class PlanUsageHistoryStore: @unchecked Sendable {
 struct DailyTokenUsage {
     let day: Date
     var byModel: [String: TokenUsagePayload]
+    var costByModel: [String: Decimal]
+    var unpricedModels: Set<String>
+    var cacheSavings: Decimal
+    var priorityTokensByModel: [String: Int]
+    var fastTokensByModel: [String: Int]
 
     var totalTokens: Int {
         byModel.values.reduce(0) { $0 + $1.totalTokens }
     }
+}
+
+struct UsagePeriodStats {
+    var usage = TokenUsagePayload.zero
+    var activeDays = 0
+    var modelTokens: [String: Int] = [:]
+
+    var activeDayAverage: Double? {
+        activeDays > 0 ? Double(usage.totalTokens) / Double(activeDays) : nil
+    }
+
+    var contextLeverage: Double? {
+        guard usage.inputTokens > 0 else { return nil }
+        let uncached = usage.inputTokens - usage.cachedInputTokens
+        return uncached > 0 ? Double(usage.inputTokens) / Double(uncached) : .infinity
+    }
+}
+
+struct UsagePeriodComparison {
+    let current: UsagePeriodStats
+    let previous: UsagePeriodStats
+    let hasCompleteBaseline: Bool
+
+    var tokenChangePercent: Int? {
+        guard hasCompleteBaseline else { return nil }
+        return Self.percentChange(current.usage.totalTokens, from: previous.usage.totalTokens)
+    }
+
+    var activeDayChangePercent: Int? {
+        guard hasCompleteBaseline else { return nil }
+        guard let current = current.activeDayAverage, let previous = previous.activeDayAverage else { return nil }
+        return Self.percentChange(current, from: previous)
+    }
+
+    private static func percentChange<T: BinaryInteger>(_ current: T, from previous: T) -> Int? {
+        percentChange(Double(current), from: Double(previous))
+    }
+
+    private static func percentChange(_ current: Double, from previous: Double) -> Int? {
+        guard previous > 0 else { return nil }
+        return Int((((current / previous) - 1) * 100).rounded())
+    }
+}
+
+struct AllowanceYieldSample {
+    let resetAt: Date
+    let tokensPerPoint: Double
+    let observedPoints: Int
+}
+
+struct AllowanceYieldComparison {
+    let current: AllowanceYieldSample?
+    let previous: AllowanceYieldSample?
+
+    var changePercent: Int? {
+        guard let current, let previous, previous.tokensPerPoint > 0 else { return nil }
+        return Int((((current.tokensPerPoint / previous.tokensPerPoint) - 1) * 100).rounded())
+    }
+}
+
+struct PlanPace {
+    let multiplier: Double
+    let projectedPercent: Int
 }
 
 enum UsageHistoryAnalytics {
@@ -111,15 +181,48 @@ enum UsageHistoryAnalytics {
         let today = calendar.startOfDay(for: now)
         let firstDay = calendar.date(byAdding: .day, value: 1 - days, to: today) ?? today
         var totals: [Date: [String: TokenUsagePayload]] = [:]
+        var costs: [Date: [String: Decimal]] = [:]
+        var unpriced: [Date: Set<String>] = [:]
+        var savings: [Date: Decimal] = [:]
+        var priorityTokens: [Date: [String: Int]] = [:]
+        var fastTokens: [Date: [String: Int]] = [:]
 
         for bucket in buckets where bucket.startedAt >= firstDay && bucket.startedAt <= now {
             let day = calendar.startOfDay(for: bucket.startedAt)
             totals[day, default: [:]][bucket.model, default: .zero].add(bucket.usage)
+            if let cost = TokenPricingCatalog.standard.estimateCost(
+                for: bucket.model,
+                usage: bucket.usage,
+                serviceTier: bucket.serviceTier
+            ) {
+                costs[day, default: [:]][bucket.model, default: 0] += cost.total
+            } else {
+                unpriced[day, default: []].insert(bucket.model)
+            }
+            savings[day, default: 0] += TokenPricingCatalog.standard.estimateCacheSavings(
+                for: bucket.model,
+                usage: bucket.usage,
+                serviceTier: bucket.serviceTier
+            ) ?? 0
+            if bucket.serviceTier?.lowercased() == "priority" {
+                priorityTokens[day, default: [:]][bucket.model, default: 0] += bucket.usage.totalTokens
+                if bucket.usesChatGPTCredits == true {
+                    fastTokens[day, default: [:]][bucket.model, default: 0] += bucket.usage.totalTokens
+                }
+            }
         }
 
         return (0..<days).compactMap { offset in
             guard let day = calendar.date(byAdding: .day, value: offset, to: firstDay) else { return nil }
-            return DailyTokenUsage(day: day, byModel: totals[day] ?? [:])
+            return DailyTokenUsage(
+                day: day,
+                byModel: totals[day] ?? [:],
+                costByModel: costs[day] ?? [:],
+                unpricedModels: unpriced[day] ?? [],
+                cacheSavings: savings[day] ?? 0,
+                priorityTokensByModel: priorityTokens[day] ?? [:],
+                fastTokensByModel: fastTokens[day] ?? [:]
+            )
         }
     }
 
@@ -145,30 +248,125 @@ enum UsageHistoryAnalytics {
         return result
     }
 
-    static func modelTotals(from days: [DailyTokenUsage]) -> [(model: String, usage: TokenUsagePayload)] {
-        var totals: [String: TokenUsagePayload] = [:]
-        for day in days {
-            for (model, usage) in day.byModel {
-                totals[model, default: .zero].add(usage)
-            }
+    static func calendarComparison(
+        from buckets: [TokenUsageBucket],
+        component: Calendar.Component,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> UsagePeriodComparison? {
+        guard let currentInterval = calendar.dateInterval(of: component, for: now),
+              let previousProbe = calendar.date(byAdding: .second, value: -1, to: currentInterval.start),
+              let previousInterval = calendar.dateInterval(of: component, for: previousProbe) else {
+            return nil
         }
-        return totals.map { ($0.key, $0.value) }.sorted { $0.usage.totalTokens > $1.usage.totalTokens }
+        let elapsed = now.timeIntervalSince(currentInterval.start)
+        let previousEnd = min(previousInterval.end, previousInterval.start.addingTimeInterval(elapsed))
+        return UsagePeriodComparison(
+            current: periodStats(from: buckets, since: currentInterval.start, before: now, calendar: calendar),
+            previous: periodStats(from: buckets, since: previousInterval.start, before: previousEnd, calendar: calendar),
+            hasCompleteBaseline: buckets.map(\.startedAt).min().map { $0 <= previousInterval.start } == true
+        )
     }
 
-    static func hourlyActivity(
+    static func rollingComparison(
         from buckets: [TokenUsageBucket],
         days: Int,
         now: Date = Date(),
         calendar: Calendar = .current
-    ) -> [[Int]] {
-        let cutoff = calendar.date(byAdding: .day, value: -days, to: now) ?? now
-        var values = Array(repeating: Array(repeating: 0, count: 24), count: 7)
-        for bucket in buckets where bucket.startedAt >= cutoff && bucket.startedAt <= now {
-            let weekday = calendar.component(.weekday, from: bucket.startedAt) - 1
-            let hour = calendar.component(.hour, from: bucket.startedAt)
-            values[weekday][hour] += bucket.usage.totalTokens
+    ) -> UsagePeriodComparison {
+        let currentStart = calendar.date(byAdding: .day, value: -days, to: now) ?? now
+        let previousStart = calendar.date(byAdding: .day, value: -days, to: currentStart) ?? currentStart
+        return UsagePeriodComparison(
+            current: periodStats(from: buckets, since: currentStart, before: now, calendar: calendar),
+            previous: periodStats(from: buckets, since: previousStart, before: currentStart, calendar: calendar),
+            hasCompleteBaseline: buckets.map(\.startedAt).min().map { $0 <= previousStart } == true
+        )
+    }
+
+    static func allowanceYield(
+        from buckets: [TokenUsageBucket],
+        history: PlanUsageHistory
+    ) -> AllowanceYieldComparison {
+        let samples = Dictionary(grouping: history.samples.compactMap { sample -> (Date, PlanUsageSample)? in
+            guard let reset = sample.secondaryResetsAt, sample.secondaryPercent != nil else { return nil }
+            return (reset, sample)
+        }, by: \.0)
+        .compactMap { reset, pairs -> AllowanceYieldSample? in
+            let ordered = pairs.map(\.1).sorted { $0.recordedAt < $1.recordedAt }
+            guard let first = ordered.first, let last = ordered.last,
+                  let firstPercent = first.secondaryPercent, let lastPercent = last.secondaryPercent else {
+                return nil
+            }
+            let points = lastPercent - firstPercent
+            guard points >= 2 else { return nil }
+            let tokens = buckets.lazy
+                .filter {
+                    $0.startedAt >= first.recordedAt &&
+                    $0.startedAt <= last.recordedAt &&
+                    $0.usesChatGPTCredits != false
+                }
+                .reduce(0) { $0 + $1.usage.totalTokens }
+            guard tokens > 0 else { return nil }
+            return AllowanceYieldSample(
+                resetAt: reset,
+                tokensPerPoint: Double(tokens) / Double(points),
+                observedPoints: points
+            )
         }
-        return values
+        .sorted { $0.resetAt > $1.resetAt }
+        return AllowanceYieldComparison(current: samples.first, previous: samples.dropFirst().first)
+    }
+
+    static func planPace(snapshot: CodexUsageSnapshot?, now: Date = Date()) -> PlanPace? {
+        guard snapshot?.isStale == false,
+              let window = snapshot?.secondary,
+              let durationMinutes = window.windowDurationMins,
+              durationMinutes > 0,
+              let resetsAt = window.resetsAt else {
+            return nil
+        }
+        let duration = TimeInterval(durationMinutes * 60)
+        let elapsed = min(max(now.timeIntervalSince(resetsAt.addingTimeInterval(-duration)) / duration, 0), 1)
+        guard elapsed > 0 else { return nil }
+        return PlanPace(
+            multiplier: Double(window.usedPercent) / (elapsed * 100),
+            projectedPercent: Int((Double(window.usedPercent) / elapsed).rounded())
+        )
+    }
+
+    static func modelTotals(from days: [DailyTokenUsage]) -> [(model: String, usage: TokenUsagePayload, cost: Decimal?)] {
+        var totals: [String: TokenUsagePayload] = [:]
+        var costs: [String: Decimal] = [:]
+        var unpriced = Set<String>()
+        for day in days {
+            for (model, usage) in day.byModel {
+                totals[model, default: .zero].add(usage)
+            }
+            for (model, cost) in day.costByModel {
+                costs[model, default: 0] += cost
+            }
+            unpriced.formUnion(day.unpricedModels)
+        }
+        return totals.map { model, usage in
+            (model, usage, unpriced.contains(model) ? nil : costs[model])
+        }.sorted { $0.usage.totalTokens > $1.usage.totalTokens }
+    }
+
+    private static func periodStats(
+        from buckets: [TokenUsageBucket],
+        since start: Date,
+        before end: Date,
+        calendar: Calendar
+    ) -> UsagePeriodStats {
+        var result = UsagePeriodStats()
+        var days = Set<Date>()
+        for bucket in buckets where bucket.startedAt >= start && bucket.startedAt < end {
+            result.usage.add(bucket.usage)
+            result.modelTokens[bucket.model, default: 0] += bucket.usage.totalTokens
+            days.insert(calendar.startOfDay(for: bucket.startedAt))
+        }
+        result.activeDays = days.count
+        return result
     }
 
     static func weeklyPointsToday(
