@@ -60,6 +60,11 @@ final class CodexSessionLogUsageSource: SessionLogUsageSource, @unchecked Sendab
         }
 
         let decoder = JSONDecoder()
+        var codexLimits: SessionRateLimitsPayload?
+        var sparkLimits: SessionRateLimitsPayload?
+        var codexTimestamp: Date?
+        var fallbackTimestamp: Date?
+
         for line in lines.reversed() {
             guard line.contains("\"token_count\""), line.contains("\"rate_limits\"") else {
                 continue
@@ -77,17 +82,51 @@ final class CodexSessionLogUsageSource: SessionLogUsageSource, @unchecked Sendab
                 continue
             }
 
-            return CodexUsageSnapshot(
-                account: .empty,
-                primary: rateLimits.primary.map(mapWindow),
-                secondary: rateLimits.secondary.map(mapWindow),
-                source: .sessionLog,
-                lastUpdatedAt: timestamp(from: entry.timestamp) ?? modificationDate(for: fileURL) ?? Date(),
-                isStale: true
+            let entryDate = timestamp(from: entry.timestamp)
+            if fallbackTimestamp == nil {
+                fallbackTimestamp = entryDate
+            }
+
+            let isSpark = RateLimitBucketClassifier.isSpark(limitID: rateLimits.limitId, limitName: rateLimits.limitName)
+
+            if isSpark {
+                if sparkLimits == nil {
+                    sparkLimits = rateLimits
+                }
+            } else {
+                if codexLimits == nil {
+                    codexLimits = rateLimits
+                    codexTimestamp = entryDate
+                }
+            }
+
+            if codexLimits != nil {
+                break
+            }
+        }
+
+        guard let effectiveLimits = codexLimits ?? sparkLimits else {
+            return nil
+        }
+
+        let sparkSnapshot = sparkLimits.map {
+            SupplementalRateLimitSnapshot(
+                limitID: $0.limitId ?? "codex_bengalfox",
+                title: "5.3 Spark",
+                primary: $0.primary.map(mapWindow),
+                secondary: $0.secondary.map(mapWindow)
             )
         }
 
-        return nil
+        return CodexUsageSnapshot(
+            account: .empty,
+            primary: effectiveLimits.primary.map(mapWindow),
+            secondary: effectiveLimits.secondary.map(mapWindow),
+            spark: sparkSnapshot,
+            source: .sessionLog,
+            lastUpdatedAt: codexTimestamp ?? fallbackTimestamp ?? modificationDate(for: fileURL) ?? Date(),
+            isStale: true
+        )
     }
 
     private func readTail(of fileURL: URL, maxBytes: Int) throws -> (data: Data, startedMidFile: Bool) {
@@ -139,8 +178,17 @@ private struct SessionLogPayload: Decodable {
 }
 
 private struct SessionRateLimitsPayload: Decodable {
+    let limitId: String?
+    let limitName: String?
     let primary: SessionRateLimitWindow?
     let secondary: SessionRateLimitWindow?
+
+    private enum CodingKeys: String, CodingKey {
+        case limitId = "limit_id"
+        case limitName = "limit_name"
+        case primary
+        case secondary
+    }
 }
 
 private struct SessionRateLimitWindow: Decodable {

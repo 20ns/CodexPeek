@@ -49,10 +49,10 @@ final class PlanUsageHistoryStore: @unchecked Sendable {
         var history = load()
         let sample = PlanUsageSample(
             recordedAt: date,
-            primaryPercent: snapshot.primary?.usedPercent,
-            secondaryPercent: snapshot.secondary?.usedPercent,
-            primaryResetsAt: snapshot.primary?.resetsAt,
-            secondaryResetsAt: snapshot.secondary?.resetsAt
+            primaryPercent: snapshot.sessionWindow?.usedPercent,
+            secondaryPercent: snapshot.weeklyWindow?.usedPercent,
+            primaryResetsAt: snapshot.sessionWindow?.resetsAt,
+            secondaryResetsAt: snapshot.weeklyWindow?.resetsAt
         )
 
         if let last = history.samples.last,
@@ -159,6 +159,32 @@ struct PlanPace {
     let projectedPercent: Int
 }
 
+struct SubscriptionModelValue: Equatable {
+    let model: String
+    let usage: TokenUsagePayload
+    let cost: Decimal?
+}
+
+struct SubscriptionValueReport {
+    let days: Int
+    let planType: CodexPlanType
+    let listPriceUSD: Decimal?
+    let proratedSeatCost: Decimal?
+    let apiEquivalentSpend: Decimal
+    let cacheRebate: Decimal
+    let openMarketMultiple: Double?
+    let breakEvenDay: Date?
+    let breakEvenDayIndex: Int?
+    let dollarsPerAllowancePoint: Decimal?
+    let reasoningTaxUSD: Decimal?
+    let contextCostUSD: Decimal
+    let generationCostUSD: Decimal
+    let creditModeSharePercent: Int?
+    let hasUnpricedUsage: Bool
+    let topModelsByValue: [SubscriptionModelValue]
+    let daily: [DailyTokenUsage]
+}
+
 enum UsageHistoryAnalytics {
     static func usage(
         from buckets: [TokenUsageBucket],
@@ -204,7 +230,7 @@ enum UsageHistoryAnalytics {
                 usage: bucket.usage,
                 serviceTier: bucket.serviceTier
             ) ?? 0
-            if bucket.serviceTier?.lowercased() == "priority" {
+            if TokenPricingCatalog.isFastTier(bucket.serviceTier) {
                 priorityTokens[day, default: [:]][bucket.model, default: 0] += bucket.usage.totalTokens
                 if bucket.usesChatGPTCredits == true {
                     fastTokens[day, default: [:]][bucket.model, default: 0] += bucket.usage.totalTokens
@@ -319,7 +345,7 @@ enum UsageHistoryAnalytics {
 
     static func planPace(snapshot: CodexUsageSnapshot?, now: Date = Date()) -> PlanPace? {
         guard snapshot?.isStale == false,
-              let window = snapshot?.secondary,
+              let window = snapshot?.weeklyWindow,
               let durationMinutes = window.windowDurationMins,
               durationMinutes > 0,
               let resetsAt = window.resetsAt else {
@@ -385,5 +411,135 @@ enum UsageHistoryAnalytics {
             return nil
         }
         return max(0, latest.usedPercent - percent)
+    }
+
+    static func availableHistoryDays(
+        from buckets: [TokenUsageBucket],
+        now: Date = Date(),
+        calendar: Calendar = .current,
+        cappedAt maxDays: Int = 90
+    ) -> Int {
+        guard let earliest = buckets.map(\.startedAt).min() else { return 1 }
+        let today = calendar.startOfDay(for: now)
+        let start = calendar.startOfDay(for: earliest)
+        let span = (calendar.dateComponents([.day], from: start, to: today).day ?? 0) + 1
+        return min(max(span, 1), maxDays)
+    }
+
+    static func subscriptionValue(
+        from buckets: [TokenUsageBucket],
+        days: Int,
+        planType: CodexPlanType,
+        allowance: AllowanceYieldComparison,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> SubscriptionValueReport {
+        let daily = dailyUsage(from: buckets, days: days, now: now, calendar: calendar)
+        let today = calendar.startOfDay(for: now)
+        let firstDay = calendar.date(byAdding: .day, value: 1 - days, to: today) ?? today
+
+        var spend: Decimal = 0
+        var cacheRebate: Decimal = 0
+        var contextCost: Decimal = 0
+        var generationCost: Decimal = 0
+        var totalTokens = 0
+        var creditTokens = 0
+        var hasUnpriced = false
+        var rangeUsage = TokenUsagePayload.zero
+
+        for day in daily {
+            spend += day.costByModel.values.reduce(Decimal(0), +)
+            cacheRebate += day.cacheSavings
+            if !day.unpricedModels.isEmpty { hasUnpriced = true }
+            for usage in day.byModel.values {
+                rangeUsage.add(usage)
+                totalTokens += usage.totalTokens
+            }
+        }
+
+        for bucket in buckets where bucket.startedAt >= firstDay && bucket.startedAt <= now {
+            if bucket.usesChatGPTCredits == true {
+                creditTokens += bucket.usage.totalTokens
+            }
+            if let cost = TokenPricingCatalog.standard.estimateCost(
+                for: bucket.model,
+                usage: bucket.usage,
+                serviceTier: bucket.serviceTier
+            ) {
+                contextCost += cost.uncachedInput + cost.cachedInput
+                generationCost += cost.output
+            } else {
+                hasUnpriced = true
+            }
+        }
+
+        let listPrice = planType.listPriceUSD
+        let prorated: Decimal? = listPrice.map { $0 * Decimal(days) / Decimal(30) }
+
+        var cumulative: Decimal = 0
+        var breakEvenDay: Date?
+        var breakEvenIndex: Int?
+        if let prorated, prorated > 0 {
+            for (index, day) in daily.enumerated() {
+                cumulative += day.costByModel.values.reduce(Decimal(0), +)
+                if cumulative >= prorated {
+                    breakEvenDay = day.day
+                    breakEvenIndex = index + 1
+                    break
+                }
+            }
+        }
+
+        let multiple: Double? = {
+            guard let prorated, prorated > 0 else { return nil }
+            let ratio = spend / prorated
+            return NSDecimalNumber(decimal: ratio).doubleValue
+        }()
+
+        let dollarsPerPoint: Decimal? = {
+            guard let tokensPerPoint = allowance.current?.tokensPerPoint, tokensPerPoint > 0, totalTokens > 0, spend > 0 else {
+                return nil
+            }
+            return spend / Decimal(totalTokens) * Decimal(tokensPerPoint)
+        }()
+
+        let reasoningTax: Decimal? = {
+            guard rangeUsage.outputTokens > 0, generationCost > 0 else { return nil }
+            return generationCost * Decimal(rangeUsage.reasoningOutputTokens) / Decimal(rangeUsage.outputTokens)
+        }()
+
+        let creditShare: Int? = totalTokens > 0
+            ? Int((Double(creditTokens) / Double(totalTokens) * 100).rounded())
+            : nil
+
+        let topModels = modelTotals(from: daily)
+            .sorted { lhs, rhs in
+                let left = lhs.cost ?? -1
+                let right = rhs.cost ?? -1
+                if left != right { return left > right }
+                return lhs.usage.totalTokens > rhs.usage.totalTokens
+            }
+            .prefix(3)
+            .map { SubscriptionModelValue(model: $0.model, usage: $0.usage, cost: $0.cost) }
+
+        return SubscriptionValueReport(
+            days: days,
+            planType: planType,
+            listPriceUSD: listPrice,
+            proratedSeatCost: prorated,
+            apiEquivalentSpend: spend,
+            cacheRebate: cacheRebate,
+            openMarketMultiple: multiple,
+            breakEvenDay: breakEvenDay,
+            breakEvenDayIndex: breakEvenIndex,
+            dollarsPerAllowancePoint: dollarsPerPoint,
+            reasoningTaxUSD: reasoningTax,
+            contextCostUSD: contextCost,
+            generationCostUSD: generationCost,
+            creditModeSharePercent: creditShare,
+            hasUnpricedUsage: hasUnpriced,
+            topModelsByValue: Array(topModels),
+            daily: daily
+        )
     }
 }

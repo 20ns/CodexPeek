@@ -134,6 +134,32 @@ enum AppServerLineParser {
     }
 }
 
+enum RateLimitBucketClassifier {
+    static func isSpark(limitID: String?, limitName: String?) -> Bool {
+        if limitID == "codex_bengalfox" {
+            return true
+        }
+        let idLower = limitID?.localizedLowercase ?? ""
+        let nameLower = limitName?.localizedLowercase ?? ""
+        return idLower.contains("spark") || nameLower.contains("spark")
+    }
+
+    static func isCodex(limitID: String?, limitName: String?) -> Bool {
+        if isSpark(limitID: limitID, limitName: limitName) {
+            return false
+        }
+        guard limitID != nil || limitName != nil else {
+            return true
+        }
+        if limitID == "codex" {
+            return true
+        }
+        let idLower = limitID?.localizedLowercase ?? ""
+        let nameLower = limitName?.localizedLowercase ?? ""
+        return idLower.contains("codex") || nameLower.contains("codex")
+    }
+}
+
 enum AppServerRateLimitSelector {
     static func selectCodexSnapshot(from response: AppServerRateLimitsResponse) -> AppServerRateLimitSnapshot {
         guard let buckets = response.rateLimitsByLimitId else {
@@ -145,9 +171,7 @@ enum AppServerRateLimitSelector {
         }
 
         return buckets.values.first { snapshot in
-            let limitName = snapshot.limitName?.localizedLowercase ?? ""
-            let limitID = snapshot.limitId?.localizedLowercase ?? ""
-            return limitName.contains("codex") || limitID.contains("codex")
+            RateLimitBucketClassifier.isCodex(limitID: snapshot.limitId, limitName: snapshot.limitName)
         } ?? response.rateLimits
     }
 
@@ -161,9 +185,7 @@ enum AppServerRateLimitSelector {
         }
 
         return rateLimitsByLimitId.values.first { snapshot in
-            let limitName = snapshot.limitName?.localizedLowercase ?? ""
-            let limitID = snapshot.limitId?.localizedLowercase ?? ""
-            return limitName.contains("spark") || limitID.contains("spark")
+            RateLimitBucketClassifier.isSpark(limitID: snapshot.limitId, limitName: snapshot.limitName)
         }
     }
 }

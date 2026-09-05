@@ -98,6 +98,22 @@ enum UIFormatters {
         accountRenewal.string(from: date)
     }
 
+    nonisolated static func rateLimitWindowTitle(for window: RateLimitWindowSnapshot?, fallback: String = "Usage") -> String {
+        guard let mins = window?.windowDurationMins else { return fallback }
+        if mins >= 10080 {
+            return "Weekly window"
+        }
+        if mins % 1440 == 0 {
+            let days = mins / 1440
+            return "\(days)-day window"
+        }
+        if mins % 60 == 0 {
+            let hours = mins / 60
+            return "\(hours)-hour window"
+        }
+        return "\(mins)-minute window"
+    }
+
     nonisolated static func compactTokenString(_ value: Int) -> String {
         let absolute = Double(value)
         if absolute >= 1_000_000_000 {

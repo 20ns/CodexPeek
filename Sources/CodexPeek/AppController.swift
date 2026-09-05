@@ -125,7 +125,12 @@ final class AppController: NSObject, NSMenuDelegate {
                 self?.usageHistoryWindowController = nil
             }
         }
-        usageHistoryWindowController?.show(report: tokenReport, planHistory: planHistory, snapshot: snapshot)
+        usageHistoryWindowController?.show(
+            report: tokenReport,
+            planHistory: planHistory,
+            snapshot: snapshot,
+            accountPlan: activeAccountSnapshot?.planType ?? .unknown
+        )
         triggerRefresh(reason: "history")
         refreshTokenReportIfNeeded(force: true, delay: 0)
     }
@@ -557,18 +562,47 @@ final class AppController: NSObject, NSMenuDelegate {
         )
 
         headerView.update(snapshot: snapshot, refreshState: refreshState)
-        primaryUsageView.update(
-            title: "5-hour window",
-            window: snapshot?.primary,
-            isDimmed: isWeeklyExhausted,
-            overrideDetail: isWeeklyExhausted ? "Weekly limit reached • 5-hour window resumes after the weekly reset" : nil
-        )
-        secondaryUsageView.update(title: "Weekly window", window: snapshot?.secondary)
+
+        let sessionWindow = snapshot?.sessionWindow
+        let weeklyWindow = snapshot?.weeklyWindow
+        let hasBothWindows = sessionWindow != nil && weeklyWindow != nil
+
+        if hasBothWindows {
+            let sessionTitle = UIFormatters.rateLimitWindowTitle(for: sessionWindow, fallback: "5-hour window")
+            let weeklyTitle = UIFormatters.rateLimitWindowTitle(for: weeklyWindow, fallback: "Weekly window")
+            let overrideDetail = isWeeklyExhausted ? "Weekly limit reached • 5-hour window resumes after the weekly reset" : nil
+
+            primaryUsageView.update(
+                title: sessionTitle,
+                window: sessionWindow,
+                isDimmed: isWeeklyExhausted,
+                overrideDetail: overrideDetail
+            )
+            secondaryUsageView.update(title: weeklyTitle, window: weeklyWindow)
+            secondaryUsageItem.isHidden = false
+        } else {
+            let singleWindow = weeklyWindow ?? sessionWindow ?? snapshot?.primary
+            let title = UIFormatters.rateLimitWindowTitle(for: singleWindow, fallback: singleWindow?.isWeekly == true ? "Weekly window" : "Usage")
+
+            primaryUsageView.update(
+                title: title,
+                window: singleWindow,
+                isDimmed: false,
+                overrideDetail: nil
+            )
+            secondaryUsageItem.isHidden = true
+        }
+
         sparkUsageView.update(snapshot: snapshot?.spark)
         sparkUsageItem.isHidden = snapshot?.spark == nil
         tokenCostView.update(report: tokenReport, isRefreshing: tokenReportTask != nil)
         statusView.update(snapshot: snapshot, refreshState: refreshState, accountStatus: accountStatusMessage())
-        usageHistoryWindowController?.update(report: tokenReport, planHistory: planHistory, snapshot: snapshot)
+        usageHistoryWindowController?.update(
+            report: tokenReport,
+            planHistory: planHistory,
+            snapshot: snapshot,
+            accountPlan: activeAccountSnapshot?.planType ?? .unknown
+        )
         renderAccountsMenu()
 
         launchAtLoginItem.state = launchAtLoginController.isEnabled ? .on : .off

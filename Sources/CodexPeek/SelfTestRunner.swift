@@ -13,6 +13,7 @@ struct SelfTestRunner {
         try testCurrentModelPricing()
         try testTokenUsageHistory()
         try testUsageComparisons()
+        try testSubscriptionValue()
         try testPlanUsageHistoryStore()
         try testSessionLogFallback()
         try testProfileScopedCachePaths()
@@ -20,6 +21,9 @@ struct SelfTestRunner {
         try testUsageLevelThresholds()
         try testCountdownFormatting()
         try testWeeklyExhaustionState()
+        try testRateLimitWindowSemantics()
+        try testWindowTitleFormatting()
+        try testRateLimitBucketClassifier()
         try await testMockClientIntegration()
         try await testCodexLaunch()
         print("All self-tests passed.")
@@ -73,7 +77,20 @@ struct SelfTestRunner {
         let cachedUsage = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 1_000_000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1_000_000)
         try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-5.6-sol", usage: cachedUsage) == 4.5, "cache savings mismatch")
         try expect(TokenPricingCatalog.standard.displayModelName(for: "gpt-5.6-terra-2026") == "GPT-5.6 Terra", "GPT-5.6 Terra prefix pricing missing")
+        let terraCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-terra", usage: usage), "GPT-5.6 Terra pricing missing")
+        try expect(terraCost.total == 14, "GPT-5.6 Terra pricing mismatch")
+        let lunaCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-luna", usage: usage), "GPT-5.6 Luna pricing missing")
+        try expect(lunaCost.total == Decimal(1.4), "GPT-5.6 Luna pricing mismatch")
+        try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-5.6-luna", usage: cachedUsage) == Decimal(0.18), "GPT-5.6 Luna cache savings mismatch")
         try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.3-codex-spark", usage: usage) == nil, "unpriced variants should not inherit base pricing")
+        let astraCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-6-astra", usage: usage), "GPT-6 Astra pricing missing")
+        try expect(astraCost.total == 60, "GPT-6 Astra pricing mismatch")
+        let astraFastCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-6-astra", usage: usage, serviceTier: "fast"), "GPT-6 Astra Fast pricing missing")
+        try expect(astraFastCost.total == 120, "GPT-6 Astra Fast pricing mismatch")
+        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6-astra-2026", usage: usage)?.total == 60, "GPT-6 Astra snapshot pricing missing")
+        try expect(TokenPricingCatalog.standard.displayModelName(for: "gpt-6-astra") == "GPT-6 Astra", "GPT-6 Astra display name mismatch")
+        try expect(TokenPricingCatalog.standard.fastCreditMultiplier(for: "gpt-6-astra") == 2.5, "GPT-6 Astra Fast credit multiplier mismatch")
+        try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-6-astra", usage: cachedUsage) == 9, "GPT-6 Astra cache savings mismatch")
         try expect(UIFormatters.compactTokenString(2_106_400_000) == "2.1B", "billion token formatting mismatch")
     }
 
@@ -211,6 +228,100 @@ struct SelfTestRunner {
         )
         let pace = try unwrap(UsageHistoryAnalytics.planPace(snapshot: snapshot, now: now), "plan pace missing")
         try expect(abs(pace.multiplier - 1) < 0.001 && pace.projectedPercent == 100, "plan pace mismatch")
+    }
+
+    private func testSubscriptionValue() throws {
+        try expect(CodexPlanType.go.listPriceUSD == 8, "Go list price mismatch")
+        try expect(CodexPlanType.plus.listPriceUSD == 20, "Plus list price mismatch")
+        try expect(CodexPlanType.prolite.listPriceUSD == 100, "Pro Lite list price mismatch")
+        try expect(CodexPlanType.pro.listPriceUSD == 200, "Pro list price mismatch")
+        try expect(CodexPlanType.business.listPriceUSD == 25, "Business list price mismatch")
+        try expect(CodexPlanType.free.listPriceUSD == nil, "Free should have no list seat price")
+        try expect(CodexPlanType.unknown.listPriceUSD == nil, "Unknown should have no list seat price")
+        try expect(CodexPlanType.prolite.seatLabel == "Pro 5×", "Pro Lite seat label mismatch")
+        try expect(CodexPlanType.pro.seatLabel == "Pro 20×", "Pro seat label mismatch")
+
+        var calendar = Calendar(identifier: .iso8601)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = try unwrap(
+            calendar.date(from: DateComponents(year: 2026, month: 7, day: 30, hour: 18)),
+            "subscription value date missing"
+        )
+        let day: (Int) -> Date = { offset in
+            calendar.date(byAdding: .day, value: offset, to: calendar.startOfDay(for: now))!
+                .addingTimeInterval(10 * 60 * 60)
+        }
+        // gpt-5.6-sol: 1M input + 1M output = $35 API-eq per day for three days → $105 over 7d
+        let heavy = TokenUsagePayload(
+            inputTokens: 1_000_000,
+            cachedInputTokens: 0,
+            outputTokens: 1_000_000,
+            reasoningOutputTokens: 250_000,
+            totalTokens: 2_000_000
+        )
+        let light = TokenUsagePayload(
+            inputTokens: 100_000,
+            cachedInputTokens: 80_000,
+            outputTokens: 20_000,
+            reasoningOutputTokens: 0,
+            totalTokens: 120_000
+        )
+        let buckets = [
+            TokenUsageBucket(startedAt: day(-6), model: "gpt-5.6-sol", usesChatGPTCredits: true, usage: heavy),
+            TokenUsageBucket(startedAt: day(-5), model: "gpt-5.6-sol", usesChatGPTCredits: true, usage: heavy),
+            TokenUsageBucket(startedAt: day(-4), model: "gpt-5.6-sol", usesChatGPTCredits: true, usage: heavy),
+            TokenUsageBucket(startedAt: day(-2), model: "gpt-5.6-luna", usesChatGPTCredits: false, usage: light)
+        ]
+        let allowance = AllowanceYieldComparison(
+            current: AllowanceYieldSample(resetAt: now, tokensPerPoint: 1_000_000, observedPoints: 10),
+            previous: nil
+        )
+        let value = UsageHistoryAnalytics.subscriptionValue(
+            from: buckets,
+            days: 7,
+            planType: .plus,
+            allowance: allowance,
+            now: now,
+            calendar: calendar
+        )
+
+        // Plus $20 × 7/30 = ~$4.666…; spend is 3×$35 + luna cost
+        let lunaCost = try unwrap(
+            TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-luna", usage: light)?.total,
+            "luna cost missing"
+        )
+        let expectedSpend = Decimal(105) + lunaCost
+        try expect(value.listPriceUSD == 20, "subscription value should use Plus list price")
+        try expect(value.proratedSeatCost == Decimal(20) * Decimal(7) / Decimal(30), "prorated seat cost mismatch")
+        try expect(value.apiEquivalentSpend == expectedSpend, "API-equivalent spend mismatch")
+        try expect(value.openMarketMultiple.map { abs($0 - NSDecimalNumber(decimal: expectedSpend / value.proratedSeatCost!).doubleValue) < 0.001 } == true, "open-market multiple mismatch")
+        try expect(value.breakEvenDayIndex == 1, "heavy day-1 spend should break even immediately")
+        try expect(value.cacheRebate > 0, "cached luna usage should produce a cache rebate")
+        let expectedReasoningTax = value.generationCostUSD * Decimal(750_000) / Decimal(3_020_000)
+        try expect(value.reasoningTaxUSD == expectedReasoningTax, "reasoning tax should track output share")
+        try expect(value.creditModeSharePercent == 98, "credit-mode share mismatch")
+        try expect(value.dollarsPerAllowancePoint != nil, "allowance dollar yield should use tokens/pt")
+        try expect(value.topModelsByValue.first?.model == "gpt-5.6-sol", "top value model should be Sol")
+
+        let unpricedPlan = UsageHistoryAnalytics.subscriptionValue(
+            from: buckets,
+            days: 7,
+            planType: .unknown,
+            allowance: AllowanceYieldComparison(current: nil, previous: nil),
+            now: now,
+            calendar: calendar
+        )
+        try expect(unpricedPlan.openMarketMultiple == nil, "unknown plan should hide ROI multiple")
+        try expect(unpricedPlan.breakEvenDayIndex == nil, "unknown plan should not report break-even")
+
+        try expect(
+            UsageHistoryAnalytics.availableHistoryDays(from: buckets, now: now, calendar: calendar) == 7,
+            "available history should span first bucket day through today"
+        )
+        try expect(
+            UsageHistoryAnalytics.availableHistoryDays(from: [], now: now, calendar: calendar) == 1,
+            "empty history should default to 1 day"
+        )
     }
 
     private func testPlanUsageHistoryStore() throws {
@@ -669,6 +780,19 @@ struct SelfTestRunner {
         try expect(snapshot?.primary?.usedPercent == 12, "session log primary mismatch")
         try expect(snapshot?.secondary?.usedPercent == 24, "session log secondary mismatch")
         try expect(snapshot?.source == .sessionLog, "session log source mismatch")
+
+        let sparkDirectory = tempDirectory.appendingPathComponent("2026/03/09", isDirectory: true)
+        try FileManager.default.createDirectory(at: sparkDirectory, withIntermediateDirectories: true)
+        let sparkLogURL = sparkDirectory.appendingPathComponent("spark.jsonl")
+        let logWithSpark = """
+        {"timestamp":"2026-03-09T20:01:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":31.0,"window_minutes":10080,"resets_at":1773533321}}}}
+        {"timestamp":"2026-03-09T20:02:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_bengalfox","limit_name":"GPT-5.3-Codex-Spark","primary":{"used_percent":0.0,"window_minutes":300,"resets_at":1773017651},"secondary":{"used_percent":0.0,"window_minutes":10080,"resets_at":1773533321}}}}
+        """
+        try Data(logWithSpark.utf8).write(to: sparkLogURL)
+        let sparkSource = CodexSessionLogUsageSource(sessionsRootURL: tempDirectory)
+        let sparkSnapshot = try sparkSource.latestSnapshot()
+        try expect(sparkSnapshot?.primary?.usedPercent == 31, "should prefer codex limit over spark for primary")
+        try expect(sparkSnapshot?.spark?.primary?.usedPercent == 0, "should map spark limits to spark snapshot")
     }
 
     private func testProfileScopedCachePaths() throws {
@@ -812,6 +936,79 @@ struct SelfTestRunner {
 
         try expect(snapshot.isWeeklyExhausted, "weekly exhaustion should be detected")
         try expect(snapshot.secondary?.isExhausted == true, "secondary window exhaustion mismatch")
+
+        let singleWindow = CodexUsageSnapshot(
+            account: CodexAccountSnapshot(email: "nav@example.com", authMode: .chatgpt, planType: .prolite),
+            primary: RateLimitWindowSnapshot(usedPercent: 100, windowDurationMins: 10080, resetsAt: Date()),
+            secondary: nil,
+            source: .live,
+            lastUpdatedAt: Date(),
+            isStale: false
+        )
+        try expect(singleWindow.isWeeklyExhausted, "single weekly window exhaustion should be detected")
+    }
+
+    private func testRateLimitWindowSemantics() throws {
+        let twoWindow = CodexUsageSnapshot(
+            account: .empty,
+            primary: RateLimitWindowSnapshot(usedPercent: 20, windowDurationMins: 300, resetsAt: nil),
+            secondary: RateLimitWindowSnapshot(usedPercent: 40, windowDurationMins: 10080, resetsAt: nil),
+            source: .live,
+            lastUpdatedAt: Date(),
+            isStale: false
+        )
+        try expect(twoWindow.sessionWindow?.usedPercent == 20, "2-window sessionWindow mismatch")
+        try expect(twoWindow.weeklyWindow?.usedPercent == 40, "2-window weeklyWindow mismatch")
+        try expect(!twoWindow.isWeeklyExhausted, "2-window should not be exhausted")
+
+        let singleWeekly = CodexUsageSnapshot(
+            account: .empty,
+            primary: RateLimitWindowSnapshot(usedPercent: 100, windowDurationMins: 10080, resetsAt: nil),
+            secondary: nil,
+            source: .live,
+            lastUpdatedAt: Date(),
+            isStale: false
+        )
+        try expect(singleWeekly.sessionWindow == nil, "single weekly plan should have no sessionWindow")
+        try expect(singleWeekly.weeklyWindow?.usedPercent == 100, "single weekly plan weeklyWindow mismatch")
+        try expect(singleWeekly.isWeeklyExhausted, "single weekly plan at 100% should be weekly exhausted")
+
+        let singleSession = CodexUsageSnapshot(
+            account: .empty,
+            primary: RateLimitWindowSnapshot(usedPercent: 50, windowDurationMins: 300, resetsAt: nil),
+            secondary: nil,
+            source: .live,
+            lastUpdatedAt: Date(),
+            isStale: false
+        )
+        try expect(singleSession.sessionWindow?.usedPercent == 50, "single session plan sessionWindow mismatch")
+        try expect(singleSession.weeklyWindow == nil, "single session plan should have no weeklyWindow")
+        try expect(!singleSession.isWeeklyExhausted, "single session plan should not be weekly exhausted")
+    }
+
+    private func testWindowTitleFormatting() throws {
+        let fiveHour = RateLimitWindowSnapshot(usedPercent: 10, windowDurationMins: 300, resetsAt: nil)
+        let weekly = RateLimitWindowSnapshot(usedPercent: 20, windowDurationMins: 10080, resetsAt: nil)
+        let oneHour = RateLimitWindowSnapshot(usedPercent: 5, windowDurationMins: 60, resetsAt: nil)
+        let twoDay = RateLimitWindowSnapshot(usedPercent: 15, windowDurationMins: 2880, resetsAt: nil)
+        let nilWindow: RateLimitWindowSnapshot? = nil
+
+        try expect(UIFormatters.rateLimitWindowTitle(for: fiveHour) == "5-hour window", "5-hour window title mismatch")
+        try expect(UIFormatters.rateLimitWindowTitle(for: weekly) == "Weekly window", "weekly window title mismatch")
+        try expect(UIFormatters.rateLimitWindowTitle(for: oneHour) == "1-hour window", "1-hour window title mismatch")
+        try expect(UIFormatters.rateLimitWindowTitle(for: twoDay) == "2-day window", "2-day window title mismatch")
+        try expect(UIFormatters.rateLimitWindowTitle(for: nilWindow, fallback: "Custom") == "Custom", "fallback title mismatch")
+    }
+
+    private func testRateLimitBucketClassifier() throws {
+        try expect(RateLimitBucketClassifier.isSpark(limitID: "codex_bengalfox", limitName: "GPT-5.3-Codex-Spark"), "bengalfox should be spark")
+        try expect(RateLimitBucketClassifier.isSpark(limitID: "spark-preview", limitName: nil), "spark id should be spark")
+        try expect(!RateLimitBucketClassifier.isSpark(limitID: "codex", limitName: nil), "codex should not be spark")
+
+        try expect(RateLimitBucketClassifier.isCodex(limitID: "codex", limitName: nil), "codex id should be codex")
+        try expect(RateLimitBucketClassifier.isCodex(limitID: nil, limitName: "Codex Plus"), "codex name should be codex")
+        try expect(RateLimitBucketClassifier.isCodex(limitID: nil, limitName: nil), "nil bucket should default to codex")
+        try expect(!RateLimitBucketClassifier.isCodex(limitID: "codex_bengalfox", limitName: "GPT-5.3-Codex-Spark"), "spark should not be codex")
     }
 
     private func testMockClientIntegration() async throws {

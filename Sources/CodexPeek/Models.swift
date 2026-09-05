@@ -66,6 +66,15 @@ struct RateLimitWindowSnapshot: Codable, Equatable {
     var isExhausted: Bool {
         usedPercent >= 100
     }
+
+    var isWeekly: Bool {
+        (windowDurationMins ?? 0) >= 10080
+    }
+
+    var isSession: Bool {
+        guard let windowDurationMins else { return false }
+        return windowDurationMins < 1440
+    }
 }
 
 struct SupplementalRateLimitSnapshot: Codable, Equatable {
@@ -182,6 +191,36 @@ extension CodexPlanType {
 
         return rawValue.capitalized
     }
+
+    /// ChatGPT list price used for seat-value ROI. Nil when no public seat price applies.
+    var listPriceUSD: Decimal? {
+        switch self {
+        case .go:
+            return 8
+        case .plus:
+            return 20
+        case .prolite:
+            return 100
+        case .pro:
+            return 200
+        case .business:
+            return 25
+        case .free, .team, .enterprise, .edu, .unknown:
+            return nil
+        }
+    }
+
+    /// Seat label for value copy (distinguishes Pro 5× vs Pro 20×).
+    var seatLabel: String {
+        switch self {
+        case .prolite:
+            return "Pro 5×"
+        case .pro:
+            return "Pro 20×"
+        default:
+            return displayName
+        }
+    }
 }
 
 extension SnapshotSource {
@@ -202,8 +241,30 @@ extension CodexUsageSnapshot {
         account.displayName
     }
 
+    /// The 7-day allowance window (secondary if present, otherwise primary when weekly).
+    var weeklyWindow: RateLimitWindowSnapshot? {
+        if let secondary {
+            return secondary
+        }
+        if let primary, primary.isWeekly {
+            return primary
+        }
+        return nil
+    }
+
+    /// The short session window (e.g. 5-hour), present only if distinct from the weekly window.
+    var sessionWindow: RateLimitWindowSnapshot? {
+        if secondary != nil {
+            return primary
+        }
+        if let primary, !primary.isWeekly {
+            return primary
+        }
+        return nil
+    }
+
     var isWeeklyExhausted: Bool {
-        secondary?.isExhausted == true
+        weeklyWindow?.isExhausted == true
     }
 }
 

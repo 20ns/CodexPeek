@@ -22,10 +22,16 @@ final class DefaultCodexExecutableLocator: CodexExecutableLocating, @unchecked S
 
         let searchPaths = orderedUnique(pathComponents() + [
             "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
             "/usr/local/bin",
             "/usr/bin",
             "/bin",
-            NSString(string: "~/.local/bin").expandingTildeInPath
+            NSString(string: "~/.local/bin").expandingTildeInPath,
+            NSString(string: "~/Library/pnpm").expandingTildeInPath,
+            NSString(string: "~/.local/share/pnpm").expandingTildeInPath,
+            NSString(string: "~/.cargo/bin").expandingTildeInPath,
+            NSString(string: "~/.bun/bin").expandingTildeInPath,
+            NSString(string: "~/bin").expandingTildeInPath
         ])
 
         for path in searchPaths where !path.isEmpty {

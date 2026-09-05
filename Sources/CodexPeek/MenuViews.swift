@@ -376,6 +376,7 @@ final class StatusMenuItemView: NSView {
 
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: 320),
+            heightAnchor.constraint(equalToConstant: 24),
             labelField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             labelField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             labelField.centerYAnchor.constraint(equalTo: centerYAnchor)

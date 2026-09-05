@@ -335,9 +335,10 @@ struct TokenPricingCatalog: Sendable {
     }
 
     static let standard = TokenPricingCatalog(prices: [
+        "gpt-6-astra": Price(inputPerMillion: 10, cachedInputPerMillion: 1, outputPerMillion: 50, displayName: "GPT-6 Astra", priorityMultiplier: 2, fastCreditMultiplier: 2.5),
         "gpt-5.6-sol": Price(inputPerMillion: 5, cachedInputPerMillion: 0.5, outputPerMillion: 30, displayName: "GPT-5.6 Sol", priorityMultiplier: 2, fastCreditMultiplier: 2.5),
-        "gpt-5.6-terra": Price(inputPerMillion: 2.5, cachedInputPerMillion: 0.25, outputPerMillion: 15, displayName: "GPT-5.6 Terra", priorityMultiplier: 2, fastCreditMultiplier: 2.5),
-        "gpt-5.6-luna": Price(inputPerMillion: 1, cachedInputPerMillion: 0.1, outputPerMillion: 6, displayName: "GPT-5.6 Luna", priorityMultiplier: 2, fastCreditMultiplier: 2.5),
+        "gpt-5.6-terra": Price(inputPerMillion: 2, cachedInputPerMillion: 0.2, outputPerMillion: 12, displayName: "GPT-5.6 Terra", priorityMultiplier: 2, fastCreditMultiplier: 2.5),
+        "gpt-5.6-luna": Price(inputPerMillion: 0.2, cachedInputPerMillion: 0.02, outputPerMillion: 1.2, displayName: "GPT-5.6 Luna", priorityMultiplier: 2, fastCreditMultiplier: 2.5),
         "gpt-5.5": Price(inputPerMillion: 5, cachedInputPerMillion: 0.5, outputPerMillion: 30, displayName: "GPT-5.5", priorityMultiplier: 2.5, fastCreditMultiplier: 2.5),
         "gpt-5.5-pro": Price(inputPerMillion: 30, cachedInputPerMillion: 30, outputPerMillion: 180, displayName: "GPT-5.5 Pro"),
         "gpt-5.4": Price(inputPerMillion: 2.5, cachedInputPerMillion: 0.25, outputPerMillion: 15, displayName: "GPT-5.4", priorityMultiplier: 2, fastCreditMultiplier: 2),
@@ -362,7 +363,7 @@ struct TokenPricingCatalog: Sendable {
             return nil
         }
 
-        let multiplier = serviceTier?.lowercased() == "priority" ? price.priorityMultiplier : 1
+        let multiplier = Self.isFastTier(serviceTier) ? price.priorityMultiplier : 1
         let cachedInput = max(0, usage.cachedInputTokens)
         let uncachedInput = max(0, usage.inputTokens - cachedInput)
         let inputCost = Decimal(uncachedInput) / 1_000_000 * price.inputPerMillion * multiplier
@@ -379,7 +380,7 @@ struct TokenPricingCatalog: Sendable {
         guard let price = price(for: model) else { return nil }
         return Decimal(max(0, usage.cachedInputTokens)) / 1_000_000
             * (price.inputPerMillion - price.cachedInputPerMillion)
-            * (serviceTier?.lowercased() == "priority" ? price.priorityMultiplier : 1)
+            * (Self.isFastTier(serviceTier) ? price.priorityMultiplier : 1)
     }
 
     func displayModelName(for model: String) -> String {
@@ -388,6 +389,15 @@ struct TokenPricingCatalog: Sendable {
 
     func fastCreditMultiplier(for model: String) -> Decimal? {
         price(for: model)?.fastCreditMultiplier
+    }
+
+    static func isFastTier(_ serviceTier: String?) -> Bool {
+        switch serviceTier?.lowercased() {
+        case "priority", "fast":
+            return true
+        default:
+            return false
+        }
     }
 
     private func price(for model: String) -> Price? {
