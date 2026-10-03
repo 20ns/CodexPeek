@@ -33,6 +33,10 @@ CodexBar supports a broader feature set, so this is not a blanket "better app" c
 - No always-on Codex helper process
 - Reads live usage from the official local `codex app-server` protocol
 - Charts daily and hourly token history by model, entirely on-device
+- Tracks active and archived Codex sessions, including GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna, and Astra
+- Shows Claude Code's 5-hour and weekly limits plus 7-day, 30-day and all-time API-equivalent estimates in a separate orange section
+- Backfills retained Claude Code logs, including subagents, with separate prices for cache reads, 5-minute writes and 1-hour writes
+- Usage History can show Codex, Claude Code or their combined API value; Max includes all retained history
 - Compares today, recent weeks, cache reuse, and API-equivalent value
 - Falls back gracefully to local Codex session data and cache
 - Auto-detects the signed-in Codex account
@@ -40,8 +44,10 @@ CodexBar supports a broader feature set, so this is not a blanket "better app" c
 
 Measured locally on Apple silicon during development:
 - Idle CPU: effectively `0%`
-- Idle memory: about `21 MB` in `top`
-- Refreshes happen on demand and once per minute, with brief transient spikes only while talking to Codex
+- Idle memory: about `33 MB` in the latest short `top` sample
+- Codex limits and token estimates refresh every five minutes in the background. Refresh Usage pulls immediately and restarts the five-minute wait. Startup and explicit account switches also load usage. Opening menus or history, waking the Mac and auth-file writes do not pull usage.
+- Claude limits update from local status-line events without network polling
+- Token estimates refresh every five minutes off the main thread, reusing cached records for unchanged session files
 
 ## macOS Only
 
@@ -120,6 +126,20 @@ If live refresh fails, it falls back in this order:
 1. latest local Codex session log usage event
 2. last saved snapshot cache
 
+Token history refreshes every five minutes and on manual refresh. Cost estimates use the [OpenAI API pricing table](https://developers.openai.com/api/docs/pricing), including Fast and long-context rates. These are API-equivalent estimates, not subscription charges. Models without a known rate remain unpriced.
+
+Claude quota bars use the [documented Claude Code status-line data](https://code.claude.com/docs/en/statusline#rate-limit-usage). Choose `Enable Claude local usage` once, then use Claude Code normally. The app installs a local status-line helper and preserves any existing status-line command and other settings. It backs up settings before the first edit. No Anthropic credentials, Keychain access or extra usage requests are involved.
+
+Readings arrive after Claude Code activity. The app shows the last update time, marks readings stale after five minutes and hides windows after their reset until a new reading arrives. Missing data is shown as waiting, never as zero usage or an exhausted quota. The five-hour and weekly fields require a Pro or Max subscription and may be absent before the first response. The cost estimator uses retained local logs independently.
+
+To enable the bridge from a built app:
+
+```sh
+.build/CodexPeek.app/Contents/MacOS/CodexPeek --setup-claude-statusline
+```
+
+The helper and `codexpeek-usage.json` live in `~/.claude`, or `CLAUDE_CONFIG_DIR` when set. The usage file contains only percentages, reset times and the observation time.
+
 Account identity also falls back to local `~/.codex/auth.json` metadata so the signed-in label remains useful even when usage data is stale.
 
 ## Development
@@ -155,3 +175,15 @@ The long-term plan is to ship signed and notarized releases. Until then, GitHub 
 Issues and PRs are welcome. Keep changes aligned with the project’s core goal:
 
 `lowest-overhead Codex usage visibility on macOS`
+
+### Claude token estimates
+
+Claude estimates use [Anthropic API list prices](https://platform.claude.com/docs/en/about-claude/pricing), checked on 3 October 2026. They reflect API-equivalent value, not subscription charges. Cache read and cache creation tokens are separate from regular input; structured cache durations are not counted again in the aggregate. Legacy logs without cache duration use the 5-minute write rate. Models without a known price retain their token counts and are excluded from dollar estimates. When the older `stats-cache.json` ends before all detailed logs begin, its aggregate totals are added to all-time usage with a labeled approximation using standard rates and five-minute cache writes. They are excluded if the date ranges overlap or the aggregate period ends within the last 30 days. Daily charts use detailed logs only. Deleted logs and past quota percentages cannot be reconstructed.
+
+To backfill the local Claude cache and compare the first and cached scan:
+
+```sh
+swift run -c release CodexPeek --backfill-claude
+```
+
+Run `Scripts/check_auth_watcher.sh` and `Scripts/check_refresh_cadence.sh` for watcher and refresh regression checks. Pricing and parser checks are included in `swift run CodexPeek --self-test`.

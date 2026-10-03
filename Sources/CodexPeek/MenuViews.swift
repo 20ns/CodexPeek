@@ -311,23 +311,30 @@ final class TokenCostMenuItemView: NSView {
         nil
     }
 
-    func update(report: TokenUsageReport?, isRefreshing: Bool = false) {
+    func update(report: TokenUsageReport?, isRefreshing: Bool = false, sourceName: String = "Codex", failed: Bool = false) {
         titleField.stringValue = "API-equivalent estimate\(isRefreshing ? " • refreshing" : "")"
+        toolTip = "Rolling 7- and 30-day totals in USD at published API token prices, including prompt cache reads and writes. From retained local \(sourceName) logs; unpriced models are excluded and deleted logs cannot be backfilled."
 
         guard let report, report.hasUsage else {
-            detailField.stringValue = "Calculating in background"
-            modelField.stringValue = "Uses local Codex session logs"
+            detailField.stringValue = failed ? "Could not read local logs" : (report == nil ? "Calculating in background" : "No recorded token usage")
+            modelField.stringValue = "Uses local \(sourceName) session logs"
             modelField.isHidden = false
             return
         }
 
-        let weekCost = UIFormatters.costString(report.week.estimatedCostUSD)
-        let last30DaysCost = UIFormatters.costString(report.month.estimatedCostUSD)
-        let allTimeCost = UIFormatters.costString(report.allTime.estimatedCostUSD)
+        let cost: (TokenUsageSummary) -> String = {
+            $0.hasUsage && $0.pricedSessionCount == 0 && $0.estimatedCostUSD == 0 ? "unpriced" : UIFormatters.costString($0.estimatedCostUSD)
+        }
+        let weekCost = cost(report.week)
+        let last30DaysCost = cost(report.month)
+        let allTimeCost = "\(report.legacyStats == nil ? "" : "≈")\(cost(report.allTime))"
 
-        detailField.stringValue = "7d \(weekCost) • 30d \(last30DaysCost) • all-time \(allTimeCost)"
-        modelField.stringValue = ""
-        modelField.isHidden = true
+        detailField.stringValue = report.allTime.pricedSessionCount == 0 && report.allTime.estimatedCostUSD == 0
+            ? "Recorded models have no published price"
+            : "7d \(weekCost) • 30d \(last30DaysCost) • all-time \(allTimeCost)"
+        modelField.stringValue = failed ? "Refresh failed; showing previous estimate"
+            : (report.legacyStats == nil ? "" : "Older stats included • cache writes assumed 5m")
+        modelField.isHidden = !failed && report.legacyStats == nil
     }
 
     private func setup() {
@@ -416,5 +423,144 @@ final class StatusMenuItemView: NSView {
         }
 
         labelField.stringValue = status
+    }
+
+    func update(message: String) {
+        labelField.stringValue = message
+    }
+}
+
+@MainActor
+final class MenuSectionHeaderView: NSView {
+    private let labelField = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 28))
+        translatesAutoresizingMaskIntoConstraints = false
+        labelField.font = .systemFont(ofSize: 12, weight: .semibold)
+        labelField.textColor = .labelColor
+        labelField.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(labelField)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 320),
+            heightAnchor.constraint(equalToConstant: 28),
+            labelField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            labelField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            labelField.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func update(title: String) {
+        labelField.stringValue = title
+    }
+}
+
+@MainActor
+final class OrangeUsageBarView: NSView {
+    var fraction: CGFloat? {
+        didSet { needsDisplay = true }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.progressIndicator)
+        setAccessibilityMinValue(0)
+        setAccessibilityMaxValue(100)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 290, height: 6)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds
+        guard rect.width > 0, rect.height > 0 else { return }
+        let radius = rect.height / 2
+        let trackAlpha: CGFloat = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? 0.45 : 0.22
+        NSColor.systemOrange.withAlphaComponent(trackAlpha).setFill()
+        NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+        guard let fraction, fraction > 0 else { return }
+        var fill = rect
+        fill.size.width = rect.width * min(max(fraction, 0), 1)
+        guard fill.width > 0 else { return }
+        NSColor.systemOrange.setFill()
+        NSBezierPath(roundedRect: fill, xRadius: radius, yRadius: radius).fill()
+    }
+}
+
+@MainActor
+final class ClaudeUsageMenuItemView: NSView {
+    private let titleField = NSTextField(labelWithString: "")
+    private let detailField = NSTextField(labelWithString: "")
+    private let bar = OrangeUsageBarView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 64))
+        translatesAutoresizingMaskIntoConstraints = false
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func update(title: String, window: RateLimitWindowSnapshot?) {
+        titleField.stringValue = title
+        bar.setAccessibilityLabel(title)
+        if let window {
+            bar.fraction = CGFloat(window.usedPercent) / 100
+            bar.setAccessibilityValue(window.usedPercent)
+            bar.setAccessibilityValueDescription(nil)
+            if let resetDate = window.resetsAt {
+                detailField.stringValue = "\(window.usedPercent)% used • \(UIFormatters.usageResetCountdownString(from: resetDate))"
+            } else {
+                detailField.stringValue = "\(window.usedPercent)% used • reset unavailable"
+            }
+        } else {
+            bar.fraction = nil
+            bar.setAccessibilityValue(nil)
+            bar.setAccessibilityValueDescription("Unavailable")
+            detailField.stringValue = "Unavailable"
+        }
+    }
+
+    private func setup() {
+        titleField.font = .systemFont(ofSize: 12, weight: .semibold)
+        detailField.font = .systemFont(ofSize: 11)
+        detailField.textColor = .secondaryLabelColor
+        detailField.lineBreakMode = .byTruncatingTail
+        detailField.maximumNumberOfLines = 1
+        detailField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        bar.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView(views: [titleField, bar, detailField])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 320),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            bar.widthAnchor.constraint(equalToConstant: 290),
+            bar.heightAnchor.constraint(equalToConstant: 6)
+        ])
     }
 }

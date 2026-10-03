@@ -145,6 +145,8 @@ struct TokenUsageReport: Codable, Equatable {
     var allTime: TokenUsageSummary
     var generatedAt: Date?
     var history: TokenUsageHistory? = nil
+    var legacyStats: LegacyTokenUsageStats? = nil
+    var historyIncludesAllRetainedSessions: Bool? = nil
 
     static let empty = TokenUsageReport(
         week: .empty,

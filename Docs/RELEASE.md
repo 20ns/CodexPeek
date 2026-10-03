@@ -1,5 +1,22 @@
 # Release Notes
 
+## 1.0.7
+
+- Refresh usage on one five-minute timer. Manual refresh pulls immediately and restarts the wait; opening menus or history, waking and auth-file writes do not pull usage.
+- Filter directory events to actual auth-content changes and coalesce refresh requests that overlap an active fetch.
+- Backfill cache-aware Claude Code API-equivalent estimates from retained local logs.
+- Add Codex, Claude Code and combined history views with all retained history in Max.
+- Replace Claude OAuth polling with documented local status-line quota readings, including stale and expired-window states.
+
+## 1.0.6
+
+- Add current Codex model prices, including GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna, Cyber, and Daybreak.
+- Correct GPT-5.6 Sol pricing and account for long-context and Astra Ultrafast rates.
+- Keep archived chats in token history and rebuild older indexes from session logs.
+- Refresh token history every five minutes and fix queued refreshes.
+- Add a separate orange Claude Code section with independent refresh, connection, and stale-data states.
+- Clamp unusually large usage percentages without integer overflow.
+
 ## Packaging
 
 Build local release artifacts:

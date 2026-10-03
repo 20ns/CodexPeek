@@ -46,7 +46,10 @@ struct AppServerRateLimitWindow: Decodable, Equatable {
         }
 
         let value = try container.decode(Double.self, forKey: key)
-        return clampedPercent(Int(value.rounded()))
+        guard value.isFinite else {
+            throw DecodingError.dataCorruptedError(forKey: key, in: container, debugDescription: "Usage percentage must be finite")
+        }
+        return Int(max(0, min(100, value)).rounded())
     }
 
     private static func clampedPercent(_ value: Int) -> Int {

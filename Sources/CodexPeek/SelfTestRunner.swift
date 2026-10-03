@@ -12,6 +12,11 @@ struct SelfTestRunner {
         try testFutureCodexRateLimitSelector()
         try testCurrentModelPricing()
         try testTokenUsageHistory()
+        try testArchivedAndLongContextUsage()
+        try testTokenCounterResetAndFork()
+        try testClaudeCodeUsage()
+        try testClaudeCodeTokenHistory()
+        try testLegacyClaudeBackfill()
         try testUsageComparisons()
         try testSubscriptionValue()
         try testPlanUsageHistoryStore()
@@ -41,6 +46,8 @@ struct SelfTestRunner {
         let selected = AppServerRateLimitSelector.selectCodexSnapshot(from: rateResult)
         let spark = AppServerRateLimitSelector.selectSparkSnapshot(from: rateResult)
 
+        let extreme = try JSONDecoder().decode(AppServerRateLimitWindow.self, from: Data(#"{"usedPercent":1e100}"#.utf8))
+        try expect(extreme.usedPercent == 100, "large usage percentages should clamp without overflow")
         try expect(accountEnvelope.result?.account == AppServerAccount.chatgpt(email: "nav@example.com", planType: .plus), "parser account mismatch")
         try expect(unknownAccountEnvelope.result?.account == .unknown, "unknown account should decode without breaking refresh")
         try expect(selected.limitId == "codex", "selector did not choose codex bucket")
@@ -67,15 +74,15 @@ struct SelfTestRunner {
     private func testCurrentModelPricing() throws {
         let usage = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 1_000_000, reasoningOutputTokens: 0, totalTokens: 2_000_000)
         let cost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-sol", usage: usage), "GPT-5.6 Sol pricing missing")
-        try expect(cost.total == 35, "GPT-5.6 Sol pricing mismatch")
+        try expect(cost.total == 24, "GPT-5.6 Sol pricing mismatch")
         let priorityCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-sol", usage: usage, serviceTier: "priority"), "GPT-5.6 priority pricing missing")
-        try expect(priorityCost.total == 70, "GPT-5.6 priority pricing mismatch")
+        try expect(priorityCost.total == 48, "GPT-5.6 priority pricing mismatch")
         let gpt55PriorityCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.5", usage: usage, serviceTier: "priority"), "GPT-5.5 priority pricing missing")
         try expect(gpt55PriorityCost.total == 87.5, "GPT-5.5 priority pricing mismatch")
         try expect(TokenPricingCatalog.standard.fastCreditMultiplier(for: "gpt-5.6-sol") == 2.5, "GPT-5.6 Fast credit multiplier mismatch")
         try expect(TokenPricingCatalog.standard.fastCreditMultiplier(for: "gpt-5.4") == 2, "GPT-5.4 Fast credit multiplier mismatch")
         let cachedUsage = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 1_000_000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1_000_000)
-        try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-5.6-sol", usage: cachedUsage) == 4.5, "cache savings mismatch")
+        try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-5.6-sol", usage: cachedUsage) == Decimal(string: "3.6"), "cache savings mismatch")
         try expect(TokenPricingCatalog.standard.displayModelName(for: "gpt-5.6-terra-2026") == "GPT-5.6 Terra", "GPT-5.6 Terra prefix pricing missing")
         let terraCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-terra", usage: usage), "GPT-5.6 Terra pricing missing")
         try expect(terraCost.total == 14, "GPT-5.6 Terra pricing mismatch")
@@ -91,6 +98,14 @@ struct SelfTestRunner {
         try expect(TokenPricingCatalog.standard.displayModelName(for: "gpt-6-astra") == "GPT-6 Astra", "GPT-6 Astra display name mismatch")
         try expect(TokenPricingCatalog.standard.fastCreditMultiplier(for: "gpt-6-astra") == 2.5, "GPT-6 Astra Fast credit multiplier mismatch")
         try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-6-astra", usage: cachedUsage) == 9, "GPT-6 Astra cache savings mismatch")
+        for (model, total) in [("gpt-6.1-sol", Decimal(12)), ("gpt-6-sol", Decimal(12)), ("gpt-6-luna", Decimal(string: "0.6")!), ("gpt-5.6-cyber", Decimal(string: "87.5")!), ("gpt-5.4-nano", Decimal(string: "1.45")!)] {
+            try expect(TokenPricingCatalog.standard.estimateCost(for: model, usage: usage)?.total == total, "new model pricing mismatch: \(model)")
+            try expect(TokenPricingCatalog.standard.estimateCost(for: model + "-2026-10-01", usage: usage)?.total == total, "snapshot pricing mismatch: \(model)")
+        }
+        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-sol", usage: cachedUsage)?.total == Decimal(string: "0.1"), "Sol 6.1 cached rate mismatch")
+        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-sol", usage: usage, serviceTier: "fast", isLongContext: true)?.total == 38, "long-context Fast pricing mismatch")
+        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6-astra", usage: usage, serviceTier: "ultrafast")?.total == 360, "Astra Ultrafast pricing mismatch")
+        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6-sol", usage: usage, serviceTier: "ultrafast") == nil, "unsupported tier should remain unpriced")
         try expect(UIFormatters.compactTokenString(2_106_400_000) == "2.1B", "billion token formatting mismatch")
     }
 
@@ -132,6 +147,12 @@ struct SelfTestRunner {
         {"timestamp":"\(second)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":258400}}}}
         """
         try Data(parallel.utf8).write(to: root.appendingPathComponent("parallel.jsonl"))
+        let ancient = formatter.string(from: Date().addingTimeInterval(-120 * 24 * 60 * 60))
+        let ancientLog = """
+        {"timestamp":"\(ancient)","type":"turn_context","payload":{"model":"gpt-5.4"}}
+        {"timestamp":"\(ancient)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":10},"last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":10}}}}
+        """
+        try Data(ancientLog.utf8).write(to: root.appendingPathComponent("ancient.jsonl"))
 
         let indexStore = InMemoryTokenUsageIndexStore()
         let source = CodexTokenUsageSource(sessionsRootURL: root, indexStore: indexStore)
@@ -141,11 +162,11 @@ struct SelfTestRunner {
         let modelSummaries = UsageHistoryAnalytics.modelTotals(from: daily)
         let totals = Dictionary(uniqueKeysWithValues: modelSummaries.map { ($0.model, $0.usage.totalTokens) })
 
-        try expect(report.allTime.totalTokens == 670, "v2 sub-agent history should exclude its copied parent usage")
+        try expect(report.allTime.totalTokens == 680, "v2 sub-agent history should exclude its copied parent usage")
         try expect(report.week.totalTokens == 510, "recent history should count unique request deltas")
         try expect(report.month.totalTokens == 510, "30-day history should exclude older usage")
-        try expect(report.allTime.sessionCount == 3, "history should retain session counts")
-        try expect(buckets.allSatisfy { $0.startedAt >= Date().addingTimeInterval(-90 * 24 * 60 * 60) }, "chart history should retain only 90 days")
+        try expect(report.allTime.sessionCount == 4, "history should retain session counts")
+        try expect(buckets.contains { $0.startedAt < Date().addingTimeInterval(-90 * 24 * 60 * 60) }, "chart history should retain usage older than 90 days")
         try expect(buckets.contains { $0.startedAt < Date().addingTimeInterval(-30 * 24 * 60 * 60) }, "chart history should retain prior-month comparison data")
         try expect(totals["gpt-5.4"] == 510, "model token history mismatch")
         try expect(buckets.contains { $0.serviceTier == "priority" && $0.usesChatGPTCredits == true && $0.usage.totalTokens == 90 }, "Fast usage metadata was not retained")
@@ -165,6 +186,421 @@ struct SelfTestRunner {
         try expect(refreshed.week.totalTokens == 560, "changed session logs should refresh token totals")
         try expect(refreshed.week.estimatedCostUSD > report.week.estimatedCostUSD, "changed session logs should refresh API-equivalent cost")
         try expect(indexStore.saveCount == 2, "changed session index should be rewritten")
+    }
+
+    private func testArchivedAndLongContextUsage() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        let archived = root.appendingPathComponent("archived_sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: archived, withIntermediateDirectories: true)
+        let timestamp = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-60))
+        let log = """
+        {"timestamp":"\(timestamp)","type":"turn_context","payload":{"model":"gpt-6.1-sol"}}
+        {"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000,"cached_input_tokens":100000,"output_tokens":10000,"reasoning_output_tokens":0,"total_tokens":310000},"last_token_usage":{"input_tokens":300000,"cached_input_tokens":100000,"output_tokens":10000,"reasoning_output_tokens":0,"total_tokens":310000}}}}
+        """
+        let active = sessions.appendingPathComponent("rollout.jsonl")
+        try Data(log.utf8).write(to: active)
+        let index = InMemoryTokenUsageIndexStore()
+        let source = CodexTokenUsageSource(sessionsRootURL: sessions, indexStore: index)
+        let before = try source.usageReport()
+        try expect(before.week.totalTokens == 310_000, "long request should be recorded once")
+        try expect(before.week.estimatedCostUSD == Decimal(string: "0.97"), "recording should preserve long-context prices")
+        try expect(before.history?.buckets.first?.isLongContext == true, "long-context flag missing")
+        let daily = UsageHistoryAnalytics.dailyUsage(from: before.history!.buckets, days: 2)
+        try expect(UsageHistoryAnalytics.modelTotals(from: daily).first?.cost == before.week.estimatedCostUSD, "history should use long-context prices")
+        try FileManager.default.moveItem(at: active, to: archived.appendingPathComponent("rollout.jsonl"))
+        let after = try source.usageReport()
+        try expect(after.allTime == before.allTime, "archiving should preserve totals with a cached index")
+        let invalid = TokenUsagePayload(inputTokens: 10, cachedInputTokens: 11, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 10)
+        try expect(!invalid.isConsistent, "cached tokens cannot exceed input")
+        let overflowing = TokenUsagePayload(inputTokens: Int.max, cachedInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: Int.max)
+        try expect(!overflowing.isConsistent, "inconsistent counters should not overflow validation")
+    }
+
+    private func testTokenCounterResetAndFork() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let timestamp = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-60))
+        func event(_ total: Int, last: Int? = nil, at: String? = nil) -> String {
+            let latest = last.map { ",\"last_token_usage\":{\"input_tokens\":\($0),\"cached_input_tokens\":0,\"output_tokens\":0,\"reasoning_output_tokens\":0,\"total_tokens\":\($0)}" } ?? ""
+            return "{\"timestamp\":\"\(at ?? timestamp)\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":\(total),\"cached_input_tokens\":0,\"output_tokens\":0,\"reasoning_output_tokens\":0,\"total_tokens\":\(total)}\(latest)}}}"
+        }
+        let context = "{\"timestamp\":\"\(timestamp)\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-6-sol\"}}"
+        let reset = [context, event(100, last: 100), event(80, last: 80), event(100, last: 20), context.replacingOccurrences(of: "gpt-6-sol", with: "gpt-6-luna"), event(100, last: 20), event(120)].joined(separator: "\n")
+        try Data(reset.utf8).write(to: root.appendingPathComponent("reset.jsonl"))
+        var report = try CodexTokenUsageSource(sessionsRootURL: root).usageReport()
+        try expect(report.allTime.totalTokens == 220, "counter reset should retain repeated totals and resume cumulative deltas")
+        let copiedTime = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-120))
+        let fork = ["{\"timestamp\":\"\(timestamp)\",\"type\":\"session_meta\",\"payload\":{\"thread_source\":\"user\",\"forked_from_id\":\"parent\"}}", context, event(100, at: copiedTime), event(160, at: copiedTime), event(200, at: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-30)))].joined(separator: "\n")
+        try Data(fork.utf8).write(to: root.appendingPathComponent("fork.jsonl"))
+        report = try CodexTokenUsageSource(sessionsRootURL: root).usageReport()
+        try expect(report.allTime.totalTokens == 260, "fork should add only its own 40 tokens")
+    }
+
+    private func testClaudeCodeUsage() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = root.appendingPathComponent("usage.json")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let sessionReset = 1_800_003_600.0
+        let weekReset = 1_800_604_800.0
+        let documented = #"{"session_id":"SECRET_SESSION","transcript_path":"/SECRET_TRANSCRIPT","cwd":"/SECRET_WORKSPACE","prompt":"SECRET_PROMPT","rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":\#(sessionReset)},"seven_day":{"used_percentage":41.2,"resets_at":\#(weekReset)}}}"#
+        let snapshot = try unwrap(ClaudeCodeStatusLine.capture(Data(documented.utf8), at: cache, now: now), "documented rate limits")
+        try expect(snapshot.fiveHour?.usedPercent == 24 && snapshot.fiveHour?.windowDurationMins == 300 && snapshot.fiveHour?.resetsAt == Date(timeIntervalSince1970: sessionReset), "5h window")
+        try expect(snapshot.sevenDay?.usedPercent == 41 && snapshot.sevenDay?.windowDurationMins == 10080, "7d window")
+        try expect(!snapshot.isStale && snapshot.updatedAt == now, "fresh reading")
+        let raw = String(decoding: try Data(contentsOf: cache), as: UTF8.self)
+        let mode = try FileManager.default.attributesOfItem(atPath: cache.path)[.posixPermissions] as? NSNumber
+        let decoded = try JSONDecoder().decode(ClaudeCodeUsageSnapshot.self, from: JSONEncoder().encode(snapshot))
+        try expect(!raw.contains("SECRET_") && !raw.contains("isStale") && mode?.intValue == 0o600 && decoded == snapshot, "cache keeps normalized private windows")
+        let clamped = try unwrap(ClaudeCodeStatusLine.capture(Data(#"{"rate_limits":{"five_hour":{"used_percentage":140,"resets_at":\#(sessionReset)}}}"#.utf8), at: cache, now: now), "clamp")
+        try expect(clamped.fiveHour?.usedPercent == 100 && clamped.sevenDay == nil, "missing windows must not inherit an old reading with a fresh timestamp")
+        let expiredHundred = try ClaudeCodeStatusLine.load(from: cache, now: Date(timeIntervalSince1970: sessionReset))
+        try expect(expiredHundred == nil, "an expired 100 is removed")
+        let zeroReset = sessionReset + 60
+        let zero = try unwrap(ClaudeCodeStatusLine.capture(Data(#"{"rate_limits":{"five_hour":{"used_percentage":0,"resets_at":\#(zeroReset)},"seven_day":null}}"#.utf8), at: cache, now: now), "zero")
+        try expect(zero.fiveHour?.usedPercent == 0 && zero.sevenDay == nil, "zero is a reading and null is unknown")
+        let kept = try Data(contentsOf: cache)
+        let empty = try ClaudeCodeStatusLine.capture(Data(#"{}"#.utf8), at: cache, now: now)
+        let missing = try ClaudeCodeStatusLine.capture(Data(#"{"rate_limits":{}}"#.utf8), at: cache, now: now)
+        let stillKept = try Data(contentsOf: cache)
+        try expect(empty == nil && missing == nil && stillKept == kept, "empty input leaves the cache")
+        for bad in ["{", #"{"rate_limits":{"five_hour":{"used_percentage":-1,"resets_at":1}}}"#, #"{"rate_limits":{"five_hour":{"used_percentage":1,"resets_at":-1}}}"#, #"{"rate_limits":{"five_hour":{"used_percentage":true,"resets_at":1}}}"#, #"{"rate_limits":{"five_hour":{"used_percentage":1,"resets_at":1e20}}}"#, #"{"rate_limits":[]}"#] {
+            do { _ = try ClaudeCodeStatusLine.capture(Data(bad.utf8), at: cache, now: now) }
+            catch {
+                let after = try Data(contentsOf: cache)
+                try expect(after == kept, "malformed input keeps the cache")
+                continue
+            }
+            throw CodexUsageError.invalidResponse("malformed Claude usage should fail")
+        }
+        let recent = try ClaudeCodeStatusLine.load(from: cache, now: now.addingTimeInterval(299))
+        let stale = try ClaudeCodeStatusLine.load(from: cache, now: now.addingTimeInterval(300))
+        try expect(recent?.isStale == false && stale?.isStale == true && stale?.fiveHour?.usedPercent == 0, "readings go stale after 5 minutes")
+        let expiredZero = try ClaudeCodeStatusLine.load(from: cache, now: Date(timeIntervalSince1970: zeroReset))
+        try expect(expiredZero == nil, "an expired 0 is removed")
+        try Data(#"{"updatedAt":1800000000,"fiveHour":{"usedPercent":100,"windowDurationMins":300,"resetsAt":1e20}}"#.utf8).write(to: cache)
+        let broken = try Data(contentsOf: cache)
+        var rejected = false
+        do { _ = try ClaudeCodeStatusLine.load(from: cache, now: now) } catch { rejected = true }
+        let brokenAfter = try Data(contentsOf: cache)
+        try expect(rejected && brokenAfter == broken, "a bad cache is rejected unchanged")
+        let repaired = try ClaudeCodeStatusLine.capture(Data(documented.utf8), at: cache, now: now)
+        try expect(repaired?.fiveHour?.usedPercent == 24, "fresh valid input must repair a corrupt cache")
+        let absent = try ClaudeCodeStatusLine.load(from: root.appendingPathComponent("missing.json"), now: now)
+        try expect(absent == nil, "missing cache")
+
+        let config = root.appendingPathComponent("O'Brien Dir", isDirectory: true)
+        try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
+        let binary = root.appendingPathComponent("CodexPeek")
+        let helperScript = Data("#!/bin/sh\ncat >/dev/null\n".utf8)
+        try helperScript.write(to: binary)
+        let prior = "printf 'original\\n'; cat # preserve trailing comments"
+        let settingsURL = config.appendingPathComponent("settings.json")
+        let original = try JSONSerialization.data(withJSONObject: ["theme": "dark", "statusLine": ["type": "command", "command": prior, "padding": 2]])
+        try original.write(to: settingsURL)
+        try ClaudeCodeStatusLine.install(executableURL: binary, configDirectory: config)
+        let helper = config.appendingPathComponent(".codexpeek-statusline")
+        func command(at url: URL) throws -> String {
+            let root = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+            let status = root?["statusLine"] as? [String: Any]
+            return try unwrap(status?["command"] as? String, "status command")
+        }
+        let installedCommand = try command(at: settingsURL)
+        let shell = Process()
+        let input = Pipe()
+        let output = Pipe()
+        shell.executableURL = URL(fileURLWithPath: "/bin/sh")
+        shell.arguments = ["-c", installedCommand]
+        shell.standardInput = input
+        shell.standardOutput = output
+        shell.standardError = output
+        try shell.run()
+        let payload = documented + "\n\n"
+        try input.fileHandleForWriting.write(contentsOf: Data(payload.utf8))
+        try input.fileHandleForWriting.close()
+        let printed = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        shell.waitUntilExit()
+        try expect(shell.terminationStatus == 0 && printed == "original\n" + payload, "existing shell commands retain stdin, output and quoting")
+        let saved = try JSONSerialization.jsonObject(with: Data(contentsOf: settingsURL)) as? [String: Any]
+        let status = saved?["statusLine"] as? [String: Any]
+        try expect(saved?["theme"] as? String == "dark" && status?["padding"] as? Int == 2, "other settings stay")
+        let helperBytes = try Data(contentsOf: helper)
+        try expect(helperBytes == helperScript, "helper is a private copy")
+        let backupURL = config.appendingPathComponent("settings.json.codexpeek-backup")
+        let backup = try Data(contentsOf: backupURL)
+        try expect(backup == original, "backup is the first settings")
+        let updatedScript = Data("#!/bin/sh\n# updated\ncat >/dev/null\n".utf8)
+        try updatedScript.write(to: binary)
+        try ClaudeCodeStatusLine.install(executableURL: binary, configDirectory: config)
+        let reinstalled = try command(at: settingsURL)
+        let refreshed = try Data(contentsOf: helper)
+        let backupAgain = try Data(contentsOf: backupURL)
+        let enabled = try ClaudeCodeStatusLine.isInstalled(configDirectory: config)
+        try expect(reinstalled == installedCommand && refreshed == updatedScript && backupAgain == original && enabled, "reinstall does not nest")
+        var missingBinaryRejected = false
+        do { try ClaudeCodeStatusLine.install(executableURL: root.appendingPathComponent("missing-binary"), configDirectory: config) }
+        catch { missingBinaryRejected = true }
+        let helperAfterFailure = try Data(contentsOf: helper)
+        try expect(missingBinaryRejected && helperAfterFailure == updatedScript, "failed helper updates retain the working executable")
+        let freshConfig = root.appendingPathComponent("Fresh Dir")
+        try FileManager.default.createDirectory(at: freshConfig, withIntermediateDirectories: true)
+        try ClaudeCodeStatusLine.install(executableURL: binary, configDirectory: freshConfig)
+        let freshHelper = freshConfig.appendingPathComponent(".codexpeek-statusline")
+        let freshCommand = try command(at: freshConfig.appendingPathComponent("settings.json"))
+        try expect(freshCommand == "'\(freshHelper.path)' --claude-statusline", "no prior command runs the helper")
+        for bad in ["{", #"{"statusLine":["no"]}"#] {
+            try Data(bad.utf8).write(to: settingsURL)
+            var failed = false
+            do { try ClaudeCodeStatusLine.install(executableURL: binary, configDirectory: config) } catch { failed = true }
+            let untouched = try Data(contentsOf: settingsURL)
+            try expect(failed && untouched == Data(bad.utf8), "invalid settings stay untouched")
+        }
+    }
+
+    private func testClaudeCodeTokenHistory() throws {
+        let catalog = TokenPricingCatalog.standard
+        let paired = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 1_000_000, reasoningOutputTokens: 0, totalTokens: 2_000_000)
+        let cachedOnly = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 1_000_000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1_000_000)
+        let published: [(String, String, String)] = [
+            ("claude-fable-5-1", "60", "0.25"),
+            ("claude-mythos-5-1", "60", "0.25"),
+            ("claude-opus-5-5", "24", "0.2"),
+            ("claude-sonnet-5-5", "12", "0.2"),
+            ("claude-fable-5", "60", "1"),
+            ("claude-mythos-5", "60", "1"),
+            ("claude-opus-5", "30", "0.5"),
+            ("claude-opus-4-8", "30", "0.5"),
+            ("claude-opus-4-7", "30", "0.5"),
+            ("claude-opus-4-6", "30", "0.5"),
+            ("claude-opus-4-5", "30", "0.5"),
+            ("claude-opus-4-1", "90", "1.5"),
+            ("claude-opus-4", "90", "1.5"),
+            ("claude-sonnet-5", "12", "0.2"),
+            ("claude-sonnet-4-6", "18", "0.3"),
+            ("claude-sonnet-4-5", "18", "0.3"),
+            ("claude-sonnet-4", "18", "0.3"),
+            ("claude-haiku-4-5", "6", "0.1"),
+            ("claude-haiku-3-5", "4.8", "0.08")
+        ]
+        for (model, total, read) in published {
+            try expect(catalog.estimateCost(for: model, usage: paired)?.total == Decimal(string: total), "Claude price mismatch: \(model)")
+            try expect(catalog.estimateCost(for: model + "-20261003", usage: paired)?.total == Decimal(string: total), "Claude snapshot mismatch: \(model)")
+            try expect(catalog.estimateCost(for: model, usage: cachedOnly)?.cachedInput == Decimal(string: read), "Claude cache-read mismatch: \(model)")
+        }
+        try expect(catalog.estimateCost(for: "claude-sonnet-4-6-latest", usage: paired) == nil, "aliases should stay unpriced")
+        try expect(catalog.estimateCost(for: "claude-3-5-haiku-20241022", usage: paired) == nil, "legacy ids should stay unpriced")
+        try expect(catalog.estimateCost(for: "gpt-5.6-sol", usage: paired, inferenceGeo: "us")?.total == 24, "OpenAI prices should ignore US inference")
+        for model in ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"] {
+            let standardCost = try unwrap(catalog.estimateCost(for: model, usage: paired), "Claude price missing: \(model)")
+            try expect(catalog.estimateCost(for: model, usage: paired, serviceTier: "fast")?.total == standardCost.total * 2, "Claude Fast mismatch: \(model)")
+        }
+        try expect(catalog.estimateCost(for: "claude-opus-4-6", usage: paired, serviceTier: "fast") == nil, "older Fast mode should stay unpriced")
+        try expect(catalog.estimateCost(for: "claude-sonnet-4-5", usage: paired, serviceTier: "fast") == nil, "Sonnet Fast mode should stay unpriced")
+        try expect(catalog.estimateCost(for: "claude-opus-4-8", usage: paired, serviceTier: "unpriced") == nil, "unknown speed should stay unpriced")
+        try expect(catalog.estimateCost(for: "claude-opus-4-8", usage: paired, inferenceGeo: "us")?.total == Decimal(string: "33"), "US inference should be 1.1x")
+        try expect(!catalog.chargesLongContextPremium(for: "claude-sonnet-4", inputTokens: 200_000), "200k is still standard context")
+        try expect(catalog.chargesLongContextPremium(for: "claude-sonnet-4-5", inputTokens: 200_001), "Sonnet 4.5 above 200k is long context")
+        try expect(!catalog.chargesLongContextPremium(for: "claude-sonnet-4-6", inputTokens: 300_000), "Sonnet 4.6 has no long-context premium")
+
+        let cacheUsage = TokenUsagePayload(
+            inputTokens: 3_000_000,
+            cachedInputTokens: 1_000_000,
+            outputTokens: 0,
+            reasoningOutputTokens: 0,
+            totalTokens: 3_000_000,
+            cacheCreationInputTokens: 600_000,
+            cacheCreation1hInputTokens: 400_000
+        )
+        let cacheCost = try unwrap(catalog.estimateCost(for: "claude-sonnet-4-6", usage: cacheUsage), "cache cost missing")
+        try expect(cacheCost.uncachedInput == Decimal(string: "7.65"), "write cost should sit in uncached input")
+        try expect(cacheCost.cachedInput == Decimal(string: "0.3"), "cache read cost mismatch")
+        try expect(cacheCost.total == Decimal(string: "7.95"), "cache total mismatch")
+        try expect(catalog.estimateCacheSavings(for: "claude-sonnet-4-6", usage: cacheUsage) == Decimal(string: "1.05"), "cache savings should subtract write premium")
+        try expect(catalog.estimateCost(for: "claude-sonnet-4-6", usage: cacheUsage, inferenceGeo: "us")?.total == Decimal(string: "8.745"), "US cache pricing mismatch")
+        let longUsage = TokenUsagePayload(inputTokens: 300_000, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 300_000)
+        try expect(catalog.estimateCost(for: "claude-sonnet-4", usage: longUsage, isLongContext: true)?.total == Decimal(string: "1.8"), "old Sonnet long context should double input")
+        try expect(catalog.estimateCost(for: "claude-sonnet-4-6", usage: longUsage, isLongContext: true)?.total == Decimal(string: "0.9"), "newer models ignore the long-context flag")
+        let split = ClaudeCodeTokenUsageSource.partitionCacheWrites(aggregate: 100, ephemeral5m: 40, ephemeral1h: 30)
+        try expect(split.five == 70 && split.hour == 30, "residual cache writes should be billed as 5-minute")
+        try expect(ClaudeCodeTokenUsageSource.partitionCacheWrites(aggregate: 80, ephemeral5m: nil, ephemeral1h: nil).five == 80, "aggregate-only writes are 5-minute")
+
+        let preserved = try JSONDecoder().decode(TokenUsagePayload.self, from: Data(#"{"input_tokens":3,"cached_input_tokens":1,"output_tokens":2,"reasoning_output_tokens":1,"total_tokens":5}"#.utf8))
+        try expect(preserved.cacheCreationInputTokens == nil && preserved.cacheCreation1hInputTokens == nil && preserved.isConsistent, "old payloads should decode without cache-write fields")
+        let oldBucket = try JSONDecoder().decode(TokenUsageBucket.self, from: Data(#"{"startedAt":0,"model":"gpt-5.4","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":1}}"#.utf8))
+        try expect(oldBucket.inferenceGeo == nil, "old buckets should decode without inference geo")
+        let oversized = TokenUsagePayload(inputTokens: 10, cachedInputTokens: 6, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 10, cacheCreationInputTokens: 5)
+        try expect(!oversized.isConsistent, "cache writes plus reads cannot exceed input")
+
+        let configured = ClaudeCodeTokenUsageSource.defaultProjectsRoot(
+            environment: ["CLAUDE_CONFIG_DIR": "/tmp/claude-cfg"],
+            homeDirectory: URL(fileURLWithPath: "/Users/test")
+        )
+        try expect(configured.path == "/tmp/claude-cfg/projects", "CLAUDE_CONFIG_DIR should choose the projects root")
+        let standardRoot = ClaudeCodeTokenUsageSource.defaultProjectsRoot(environment: [:], homeDirectory: URL(fileURLWithPath: "/Users/test"))
+        try expect(standardRoot.path == "/Users/test/.claude/projects", "default projects root mismatch")
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = root.appendingPathComponent("proj", isDirectory: true)
+        let subagents = project.appendingPathComponent("session/subagents", isDirectory: true)
+        try FileManager.default.createDirectory(at: subagents, withIntermediateDirectories: true)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        func stamp(_ days: Double, hours: Double = 0) -> String {
+            formatter.string(from: Date().addingTimeInterval(-days * 24 * 60 * 60 + hours * 3600))
+        }
+        func line(id: String, request: String, model: String, at: String?, input: Int = 0, output: Int = 0, read: Int = 0, aggregate: Int? = nil, five: Int? = nil, hour: Int? = nil, speed: String? = nil, geo: String? = nil, reasoning: Int? = nil, tier: String? = nil) -> String {
+            var usage = #"{"input_tokens":\#(input),"output_tokens":\#(output),"cache_read_input_tokens":\#(read)"#
+            if let aggregate { usage += #","cache_creation_input_tokens":\#(aggregate)"# }
+            if five != nil || hour != nil {
+                usage += #","cache_creation":{"ephemeral_5m_input_tokens":\#(five ?? 0),"ephemeral_1h_input_tokens":\#(hour ?? 0)}"#
+            }
+            if let speed { usage += #","speed":"\#(speed)""# }
+            if let tier { usage += #","service_tier":"\#(tier)""# }
+            if let geo { usage += #","inference_geo":"\#(geo)""# }
+            if let reasoning { usage += #","output_tokens_details":{"thinking_tokens":\#(reasoning)}"# }
+            usage += "}"
+            let timestamp = at.map { #""timestamp":"\#($0)","# } ?? ""
+            return #"{\#(timestamp)"type":"assistant","requestId":"\#(request)","message":{"id":"\#(id)","model":"\#(model)","usage":\#(usage)}}"#
+        }
+
+        let parent = [
+            #"{"type":"user","message":{"role":"user","content":"SECRET_PROMPT usage"}}"#,
+            #"{"type":"assistant","isSynthetic":true,"requestId":"r-syn","message":{"id":"m-syn","model":"claude-sonnet-4-6","usage":{"input_tokens":999,"output_tokens":0}}}"#,
+            #"{"type":"assistant","isApiErrorMessage":true,"requestId":"r-err","message":{"id":"m-err","model":"<synthetic>","usage":{"input_tokens":999,"output_tokens":0}}}"#,
+            line(id: "m-cache", request: "r-cache", model: "claude-sonnet-4-6", at: stamp(2), input: 1_000_000, read: 1_000_000, aggregate: 1_000_000, five: 600_000, hour: 400_000),
+            line(id: "m-residual", request: "r-residual", model: "claude-sonnet-4-6", at: stamp(2, hours: 1), aggregate: 100, five: 40, hour: 30),
+            line(id: "m-stream", request: "r-stream", model: "claude-sonnet-4-6", at: stamp(2, hours: 2), input: 100, output: 10),
+            line(id: "m-stream", request: "r-stream", model: "claude-sonnet-4-6", at: stamp(2, hours: 2), input: 100, output: 50, reasoning: 30),
+            line(id: "m-stream", request: "r-stream", model: "claude-sonnet-4-6", at: stamp(2, hours: 2), input: 80, output: 20),
+            line(id: "m-separate", request: "r-separate", model: "claude-sonnet-4-6", at: stamp(2, hours: 3), input: 40, output: 10),
+            line(id: "m-fast", request: "r-fast", model: "claude-sonnet-4-5", at: stamp(2, hours: 5), input: 8, speed: "fast"),
+            line(id: "m-turbo", request: "r-turbo", model: "claude-opus-4-8", at: stamp(2, hours: 6), input: 7, speed: "turbo"),
+            line(id: "m-long", request: "r-long", model: "claude-sonnet-4", at: stamp(2, hours: 7), input: 300_000),
+            line(id: "m-new", request: "r-new", model: "claude-sonnet-4-6", at: stamp(2, hours: 8), input: 300_000),
+            line(id: "m-us", request: "r-us", model: "claude-opus-4-8", at: stamp(2, hours: 9), input: 1_000_000, geo: "us"),
+            line(id: "m-reclassified", request: "r-reclassified", model: "claude-sonnet-4-6", at: stamp(2, hours: 11), input: 80, output: 10),
+            line(id: "m-reclassified", request: "r-reclassified", model: "claude-sonnet-4-6", at: stamp(2, hours: 11), input: 30, output: 10, read: 50, tier: "Priority"),
+            line(id: "m-invalid-ttl", request: "r-invalid-ttl", model: "claude-sonnet-4-6", at: stamp(2), aggregate: 1, five: 2),
+            #"{"type":"assistant","message":{"id":"m-partial""#
+        ].joined(separator: "\n")
+        try Data(parent.utf8).write(to: project.appendingPathComponent("session.jsonl"))
+        let child = [
+            line(id: "m-cache", request: "r-cache", model: "claude-sonnet-4-6", at: stamp(2), input: 1_000_000, read: 1_000_000, aggregate: 1_000_000, five: 600_000, hour: 400_000),
+            line(id: "m-child", request: "r-child", model: "claude-sonnet-4-6", at: stamp(2, hours: 10), input: 21)
+        ].joined(separator: "\n")
+        try Data(child.utf8).write(to: subagents.appendingPathComponent("agent.jsonl"))
+        try Data(line(id: "m-unknown", request: "r-unknown", model: "claude-not-a-model", at: stamp(2, hours: 4), input: 11).utf8)
+            .write(to: project.appendingPathComponent("unknown.jsonl"))
+        try Data(line(id: "m-mid", request: "r-mid", model: "claude-sonnet-4-6", at: stamp(10), input: 70).utf8)
+            .write(to: project.appendingPathComponent("mid.jsonl"))
+        try Data([
+            line(id: "m-old", request: "r-old", model: "claude-sonnet-4-6", at: stamp(40), input: 15),
+            line(id: "m-ancient", request: "r-ancient", model: "claude-sonnet-4-6", at: stamp(120), input: 9)
+        ].joined(separator: "\n").utf8).write(to: project.appendingPathComponent("old.jsonl"))
+        let mtimeURL = project.appendingPathComponent("mtime.jsonl")
+        try Data(line(id: "m-mtime", request: "r-mtime", model: "claude-sonnet-4-6", at: nil, input: 4).utf8).write(to: mtimeURL)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-10 * 24 * 60 * 60)],
+            ofItemAtPath: mtimeURL.path
+        )
+
+        // A copied partial response must not hide the completed response in another file.
+        try Data(line(id: "m-stream", request: "r-stream", model: "claude-sonnet-4-6", at: stamp(2, hours: 2), input: 100, output: 5).utf8)
+            .write(to: project.appendingPathComponent("aaa-partial.jsonl"))
+        let indexStore = InMemoryTokenUsageIndexStore()
+        let source = ClaudeCodeTokenUsageSource(projectsRootURL: root, indexStore: indexStore)
+        let report = try source.usageReport()
+        let buckets = try unwrap(report.history?.buckets, "Claude history missing")
+        let cache = 3_000_000
+        let residual = 100
+        let streaming = 150
+        let separate = 50
+        let unknown = 11
+        let fast = 8
+        let turbo = 7
+        let long = 300_000
+        let newer = 300_000
+        let us = 1_000_000
+        let childTokens = 21
+        let week = cache + residual + streaming + separate + unknown + fast + turbo + long + newer + us + childTokens + 90
+        try expect(report.week.totalTokens == week, "7-day Claude history mismatch")
+        try expect(report.month.totalTokens == week + 70 + 4, "30-day Claude history mismatch")
+        try expect(report.allTime.totalTokens == week + 70 + 4 + 15 + 9, "all-time Claude history mismatch")
+        try expect(report.week.sessionCount == 4 && report.week.pricedSessionCount == 3, "unknown models should count without a price")
+        try expect(report.month.sessionCount == 6 && report.allTime.sessionCount == 7, "historical sessions should stay in their windows")
+        try expect(buckets.contains { $0.startedAt < Date().addingTimeInterval(-90 * 24 * 60 * 60) }, "Claude history should keep usage older than 90 days")
+        let cacheBucket = try unwrap(buckets.first { $0.usage.cacheCreation1hInputTokens == 400_000 }, "cache bucket missing")
+        try expect(cacheBucket.usage.inputTokens == 3_000_000 && cacheBucket.usage.cachedInputTokens == 1_000_000 && cacheBucket.usage.cacheCreationInputTokens == 600_000, "TTL split should not double count")
+        try expect(catalog.estimateCost(for: cacheBucket.model, usage: cacheBucket.usage)?.total == Decimal(string: "7.95"), "parsed cache cost mismatch")
+        let residualBucket = try unwrap(buckets.first { $0.usage.cacheCreation1hInputTokens == 30 }, "residual bucket missing")
+        try expect(residualBucket.usage.cacheCreationInputTokens == 70 && residualBucket.usage.inputTokens == 100, "parsed residual TTL mismatch")
+        try expect(buckets.contains { $0.usage.outputTokens == 50 && $0.usage.inputTokens == 100 && $0.usage.totalTokens == 150 }, "streaming rows should merge maxima once")
+        try expect(buckets.contains { $0.usage.outputTokens == 50 && $0.usage.reasoningOutputTokens == 30 }, "reasoning must be retained inside output, never added to totals")
+        let reclassified = try unwrap(buckets.first { $0.usage.cachedInputTokens == 50 }, "reclassified request missing")
+        try expect(reclassified.usage.inputTokens == 80 && reclassified.usage.totalTokens == 90, "streamed cache reclassification must not inflate total input")
+        try expect(catalog.estimateCost(for: reclassified.model, usage: reclassified.usage, serviceTier: reclassified.serviceTier)?.total == Decimal(string: "0.000255"), "Priority capacity must not imply Fast pricing")
+        try expect(buckets.contains { $0.usage.totalTokens == 50 && $0.usage.outputTokens == 10 }, "separate requests should both count")
+        try expect(buckets.contains { $0.serviceTier == "fast" && $0.usage.totalTokens == 8 }, "fast speed should map to the fast tier")
+        try expect(buckets.contains { $0.serviceTier == "unpriced" && $0.usage.totalTokens == 7 }, "unavailable speed should be retained unpriced")
+        try expect(buckets.contains { $0.model == "claude-not-a-model" && $0.usage.totalTokens == 11 }, "unknown models should still be counted")
+        try expect(buckets.first { $0.model == "claude-sonnet-4" }?.isLongContext == true, "Sonnet 4 above 200k should be long context")
+        try expect(buckets.first { $0.model == "claude-sonnet-4-6" && $0.usage.inputTokens == 300_000 }?.isLongContext != true, "Sonnet 4.6 should not take the long-context premium")
+        let usBucket = try unwrap(buckets.first { $0.inferenceGeo == "us" }, "US inference bucket missing")
+        try expect(catalog.estimateCost(for: usBucket.model, usage: usBucket.usage, inferenceGeo: usBucket.inferenceGeo)?.total == Decimal(string: "5.5"), "parsed US price mismatch")
+        var weekCost = Decimal(0)
+        for bucket in buckets where bucket.startedAt >= Date().addingTimeInterval(-7 * 24 * 60 * 60) {
+            weekCost += catalog.estimateCost(for: bucket.model, usage: bucket.usage, serviceTier: bucket.serviceTier, isLongContext: bucket.isLongContext == true, inferenceGeo: bucket.inferenceGeo)?.total ?? 0
+        }
+        try expect(report.week.estimatedCostUSD == weekCost, "window cost should match per-request prices")
+        try expect(indexStore.saveCount == 1, "Claude session index should be saved after parsing")
+        let cachedIndex = try indexStore.encoded()
+        try expect(!String(decoding: cachedIndex, as: UTF8.self).contains("SECRET_PROMPT"), "prompt text should not be cached")
+        _ = try source.usageReport()
+        try expect(indexStore.saveCount == 1, "unchanged Claude index should not be rewritten")
+        let updated = parent + "\n" + line(id: "m-extra", request: "r-extra", model: "claude-sonnet-4-6", at: stamp(1), input: 5)
+        try Data(updated.utf8).write(to: project.appendingPathComponent("session.jsonl"))
+        let refreshed = try source.usageReport()
+        try expect(refreshed.week.totalTokens == week + 5, "changed Claude logs should refresh totals")
+        try expect(indexStore.saveCount == 2, "changed Claude index should be rewritten")
+
+        let missing = try ClaudeCodeTokenUsageSource(projectsRootURL: root.appendingPathComponent("missing")).usageReport()
+        try expect(missing.allTime.totalTokens == 0, "missing projects directory should be an empty report")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("broken.jsonl"), withIntermediateDirectories: true)
+        do {
+            _ = try ClaudeCodeTokenUsageSource(projectsRootURL: root).usageReport()
+        } catch {
+            return
+        }
+        throw CodexUsageError.invalidResponse("unreadable Claude logs should throw")
+    }
+
+    private func testLegacyClaudeBackfill() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("stats-cache.json")
+        let oldDate = Date().addingTimeInterval(-120 * 86400)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let stats = #"{"lastComputedDate":"\#(formatter.string(from: oldDate))","modelUsage":{"claude-sonnet-4-6":{"inputTokens":1000000,"outputTokens":1000,"cacheReadInputTokens":1000000,"cacheCreationInputTokens":1000000}}}"#
+        try Data(stats.utf8).write(to: url)
+        var report = TokenUsageReport.empty
+        report.history = TokenUsageHistory(buckets: [])
+        let filled = ClaudeLegacyUsage.backfill(report, from: url)
+        try expect(filled.allTime.totalTokens == 3_001_000 && filled.allTime.estimatedCostUSD == Decimal(string: "7.065"), "legacy counts and 5m cache math mismatch")
+        try expect(filled.legacyStats != nil && filled.week == .empty && filled.month == .empty, "legacy backfill must be labeled and only affect all-time")
+        try expect(ClaudeLegacyUsage.backfill(filled, from: url) == filled, "legacy backfill must be idempotent")
+        report.history = TokenUsageHistory(buckets: [TokenUsageBucket(startedAt: oldDate, model: "claude-sonnet-4-6", usage: .zero)])
+        try expect(ClaudeLegacyUsage.backfill(report, from: url) == report, "overlapping stats must not double count")
+        try Data(stats.replacingOccurrences(of: formatter.string(from: oldDate), with: formatter.string(from: Date())).utf8).write(to: url)
+        report.history = TokenUsageHistory(buckets: [])
+        try expect(ClaudeLegacyUsage.backfill(report, from: url) == report, "recent aggregates cannot produce exact rolling windows")
     }
 
     private func testUsageComparisons() throws {
@@ -251,7 +687,7 @@ struct SelfTestRunner {
             calendar.date(byAdding: .day, value: offset, to: calendar.startOfDay(for: now))!
                 .addingTimeInterval(10 * 60 * 60)
         }
-        // gpt-5.6-sol: 1M input + 1M output = $35 API-eq per day for three days → $105 over 7d
+        // Sol: $4 input + $20 output per request, with reasoning already inside output.
         let heavy = TokenUsagePayload(
             inputTokens: 1_000_000,
             cachedInputTokens: 0,
@@ -285,20 +721,19 @@ struct SelfTestRunner {
             calendar: calendar
         )
 
-        // Plus $20 × 7/30 = ~$4.666…; spend is 3×$35 + luna cost
+        // Plus $20 × 7/30; three million-token Sol requests plus Luna.
         let lunaCost = try unwrap(
             TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-luna", usage: light)?.total,
             "luna cost missing"
         )
-        let expectedSpend = Decimal(105) + lunaCost
+        let expectedSpend = Decimal(72) + lunaCost
         try expect(value.listPriceUSD == 20, "subscription value should use Plus list price")
         try expect(value.proratedSeatCost == Decimal(20) * Decimal(7) / Decimal(30), "prorated seat cost mismatch")
         try expect(value.apiEquivalentSpend == expectedSpend, "API-equivalent spend mismatch")
         try expect(value.openMarketMultiple.map { abs($0 - NSDecimalNumber(decimal: expectedSpend / value.proratedSeatCost!).doubleValue) < 0.001 } == true, "open-market multiple mismatch")
         try expect(value.breakEvenDayIndex == 1, "heavy day-1 spend should break even immediately")
         try expect(value.cacheRebate > 0, "cached luna usage should produce a cache rebate")
-        let expectedReasoningTax = value.generationCostUSD * Decimal(750_000) / Decimal(3_020_000)
-        try expect(value.reasoningTaxUSD == expectedReasoningTax, "reasoning tax should track output share")
+        try expect(value.reasoningTaxUSD == 15, "reasoning must use each model's output rate, without blending in Luna prices")
         try expect(value.creditModeSharePercent == 98, "credit-mode share mismatch")
         try expect(value.dollarsPerAllowancePoint != nil, "allowance dollar yield should use tokens/pt")
         try expect(value.topModelsByValue.first?.model == "gpt-5.6-sol", "top value model should be Sol")
@@ -1215,6 +1650,10 @@ private final class InMemoryTokenUsageIndexStore: TokenUsageSessionIndexStoring,
 
     func load() throws -> TokenUsageSessionIndex? {
         index
+    }
+
+    func encoded() throws -> Data {
+        try JSONEncoder().encode(index ?? TokenUsageSessionIndex())
     }
 
     func save(_ index: TokenUsageSessionIndex) throws {

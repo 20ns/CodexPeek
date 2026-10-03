@@ -9,7 +9,9 @@ struct TokenUsageBucket: Codable, Equatable {
     var model: String
     var serviceTier: String? = nil
     var usesChatGPTCredits: Bool? = nil
+    var isLongContext: Bool? = nil
     var usage: TokenUsagePayload
+    var inferenceGeo: String? = nil
 }
 
 struct PlanUsageSample: Codable, Equatable {
@@ -219,7 +221,9 @@ enum UsageHistoryAnalytics {
             if let cost = TokenPricingCatalog.standard.estimateCost(
                 for: bucket.model,
                 usage: bucket.usage,
-                serviceTier: bucket.serviceTier
+                serviceTier: bucket.serviceTier,
+                isLongContext: bucket.isLongContext == true,
+                inferenceGeo: bucket.inferenceGeo
             ) {
                 costs[day, default: [:]][bucket.model, default: 0] += cost.total
             } else {
@@ -228,7 +232,9 @@ enum UsageHistoryAnalytics {
             savings[day, default: 0] += TokenPricingCatalog.standard.estimateCacheSavings(
                 for: bucket.model,
                 usage: bucket.usage,
-                serviceTier: bucket.serviceTier
+                serviceTier: bucket.serviceTier,
+                isLongContext: bucket.isLongContext == true,
+                inferenceGeo: bucket.inferenceGeo
             ) ?? 0
             if TokenPricingCatalog.isFastTier(bucket.serviceTier) {
                 priorityTokens[day, default: [:]][bucket.model, default: 0] += bucket.usage.totalTokens
@@ -416,14 +422,13 @@ enum UsageHistoryAnalytics {
     static func availableHistoryDays(
         from buckets: [TokenUsageBucket],
         now: Date = Date(),
-        calendar: Calendar = .current,
-        cappedAt maxDays: Int = 90
+        calendar: Calendar = .current
     ) -> Int {
         guard let earliest = buckets.map(\.startedAt).min() else { return 1 }
         let today = calendar.startOfDay(for: now)
         let start = calendar.startOfDay(for: earliest)
         let span = (calendar.dateComponents([.day], from: start, to: today).day ?? 0) + 1
-        return min(max(span, 1), maxDays)
+        return max(span, 1)
     }
 
     static func subscriptionValue(
@@ -442,6 +447,7 @@ enum UsageHistoryAnalytics {
         var cacheRebate: Decimal = 0
         var contextCost: Decimal = 0
         var generationCost: Decimal = 0
+        var reasoningCost: Decimal = 0
         var totalTokens = 0
         var creditTokens = 0
         var hasUnpriced = false
@@ -464,10 +470,15 @@ enum UsageHistoryAnalytics {
             if let cost = TokenPricingCatalog.standard.estimateCost(
                 for: bucket.model,
                 usage: bucket.usage,
-                serviceTier: bucket.serviceTier
+                serviceTier: bucket.serviceTier,
+                isLongContext: bucket.isLongContext == true,
+                inferenceGeo: bucket.inferenceGeo
             ) {
                 contextCost += cost.uncachedInput + cost.cachedInput
                 generationCost += cost.output
+                if bucket.usage.outputTokens > 0 {
+                    reasoningCost += cost.output * Decimal(bucket.usage.reasoningOutputTokens) / Decimal(bucket.usage.outputTokens)
+                }
             } else {
                 hasUnpriced = true
             }
@@ -505,7 +516,7 @@ enum UsageHistoryAnalytics {
 
         let reasoningTax: Decimal? = {
             guard rangeUsage.outputTokens > 0, generationCost > 0 else { return nil }
-            return generationCost * Decimal(rangeUsage.reasoningOutputTokens) / Decimal(rangeUsage.outputTokens)
+            return reasoningCost
         }()
 
         let creditShare: Int? = totalTokens > 0
