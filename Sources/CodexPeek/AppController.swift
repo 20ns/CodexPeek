@@ -16,6 +16,8 @@ final class AppController: NSObject, NSMenuDelegate {
     private let codexDesktopAuthStore = CodexDesktopAuthStore()
     private let authFileWatcher = AuthFileWatcher()
     private let claudeUsageWatcher = AuthFileWatcher()
+    private let claudeUsageSource = ClaudeCodeUsageSource()
+    private var claudeUsageTask: Task<Void, Never>?
 
     private let headerView = HeaderMenuItemView()
     private let primaryUsageView = UsageMenuItemView()
@@ -125,6 +127,7 @@ final class AppController: NSObject, NSMenuDelegate {
             self.refreshTokenReportIfNeeded(force: false)
             self.refreshClaudeTokenReportIfNeeded(force: false)
             self.refreshClaudeUsage()
+            self.refreshClaudeAccountUsage()
         }
     }
 
@@ -143,6 +146,7 @@ final class AppController: NSObject, NSMenuDelegate {
         refreshTokenReportIfNeeded(force: true)
         refreshClaudeTokenReportIfNeeded(force: true)
         refreshClaudeUsage()
+        refreshClaudeAccountUsage(force: true)
     }
 
     @objc private func enableClaudeLocalUsage() {
@@ -478,6 +482,7 @@ final class AppController: NSObject, NSMenuDelegate {
                 self?.refreshTokenReportIfNeeded(force: false)
                 self?.refreshClaudeTokenReportIfNeeded(force: false)
                 self?.refreshClaudeUsage()
+                self?.refreshClaudeAccountUsage()
             }
         }
         refreshTimer?.tolerance = Self.refreshTolerance
@@ -1213,9 +1218,13 @@ final class AppController: NSObject, NSMenuDelegate {
 
     private func refreshClaudeUsage() {
         do {
-            claudeSnapshot = try ClaudeCodeStatusLine.load()
+            let cached = try ClaudeCodeStatusLine.load()
+            if let cached, cached.updatedAt != claudeSnapshot?.updatedAt, !cached.isStale {
+                claudeUsageError = nil
+            }
+            claudeSnapshot = cached
+            if claudeUsageError != nil { claudeSnapshot?.isStale = true }
             claudeBridgeEnabled = try ClaudeCodeStatusLine.isInstalled()
-            claudeUsageError = nil
         } catch {
             claudeSnapshot?.isStale = true
             let now = Date()
@@ -1226,12 +1235,34 @@ final class AppController: NSObject, NSMenuDelegate {
         render()
     }
 
+    private func refreshClaudeAccountUsage(force: Bool = false) {
+        guard claudeUsageTask == nil, force || claudeSnapshot?.isStale != false else { return }
+        claudeUsageTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.claudeUsageTask = nil; self.render() }
+            do {
+                if let fresh = try await self.claudeUsageSource.refresh(force: force) {
+                    self.claudeSnapshot = fresh
+                    self.claudeUsageError = nil
+                }
+            } catch {
+                self.refreshClaudeUsage()
+                self.claudeSnapshot?.isStale = true
+                self.claudeUsageError = error.localizedDescription
+            }
+        }
+        render()
+    }
+
     private func claudeStatusMessage() -> String {
-        if let claudeUsageError { return claudeUsageError }
+        if let claudeUsageError {
+            let time = claudeSnapshot.map { " • last updated \(UIFormatters.usageUpdatedString(from: $0.updatedAt))" } ?? ""
+            return claudeUsageError + time
+        }
         guard let claudeSnapshot else {
-            return claudeBridgeEnabled ? "Waiting for Claude Code activity" : "Enable local usage below"
+            return claudeUsageTask == nil ? "Claude usage unavailable • use Refresh Usage" : "Fetching Claude usage…"
         }
         let time = UIFormatters.usageUpdatedString(from: claudeSnapshot.updatedAt)
-        return claudeSnapshot.isStale ? "Last Claude activity \(time) • stale" : "From Claude Code • updated \(time)"
+        return claudeSnapshot.isStale ? "Claude usage updated \(time) • stale" : "From Claude Code • updated \(time)"
     }
 }

@@ -427,6 +427,7 @@ final class StatusMenuItemView: NSView {
 
     func update(message: String) {
         labelField.stringValue = message
+        labelField.toolTip = message
     }
 }
 

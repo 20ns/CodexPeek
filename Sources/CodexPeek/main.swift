@@ -40,6 +40,28 @@ if CommandLine.arguments.contains("--claude-statusline") {
         fputs("Claude backfill failed: \(error.localizedDescription)\n", stderr)
         exit(1)
     }
+} else if CommandLine.arguments.contains("--refresh-claude-usage") {
+    let semaphore = DispatchSemaphore(value: 0)
+    var exitCode: Int32 = 0
+    Task.detached {
+        do {
+            if let snapshot = try await ClaudeCodeUsageSource().refresh(force: true) {
+                let five = snapshot.fiveHour.map { "\($0.usedPercent)%" } ?? "unavailable"
+                let week = snapshot.sevenDay.map { "\($0.usedPercent)%" } ?? "unavailable"
+                print("5h \(five)")
+                print("7d \(week)")
+            } else {
+                fputs("Claude usage refresh is cooling down.\n", stderr)
+                exitCode = 1
+            }
+        } catch {
+            fputs("\(error.localizedDescription)\n", stderr)
+            exitCode = 1
+        }
+        semaphore.signal()
+    }
+    semaphore.wait()
+    exit(exitCode)
 } else if CommandLine.arguments.contains("--self-test") {
     let semaphore = DispatchSemaphore(value: 0)
     var exitCode: Int32 = 0

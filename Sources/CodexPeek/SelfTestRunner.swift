@@ -15,6 +15,7 @@ struct SelfTestRunner {
         try testArchivedAndLongContextUsage()
         try testTokenCounterResetAndFork()
         try testClaudeCodeUsage()
+        try await testClaudeOAuthUsage()
         try testClaudeCodeTokenHistory()
         try testLegacyClaudeBackfill()
         try testUsageComparisons()
@@ -360,6 +361,97 @@ struct SelfTestRunner {
             let untouched = try Data(contentsOf: settingsURL)
             try expect(failed && untouched == Data(bad.utf8), "invalid settings stay untouched")
         }
+    }
+
+    private func testClaudeOAuthUsage() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = root.appendingPathComponent("usage.json")
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        let fiveReset = "2026-10-05T03:14:15.123456+00:00"
+        let weekReset = "2026-10-11T03:14:15.500000+00:00"
+        let live = #"{"five_hour":{"utilization":5,"resets_at":"\#(fiveReset)"},"seven_day":{"utilization":38,"resets_at":"\#(weekReset)"},"extra_usage":{"is_enabled":false}}"#
+        let snapshot = try unwrap(ClaudeCodeStatusLine.captureOAuth(Data(live.utf8), at: cache, now: now), "oauth usage")
+        try expect(snapshot.fiveHour?.usedPercent == 5 && snapshot.fiveHour?.windowDurationMins == 300 && snapshot.fiveHour?.resetsAt == Formatters.parseISO8601(fiveReset), "oauth 5h")
+        try expect(snapshot.sevenDay?.usedPercent == 38 && snapshot.sevenDay?.windowDurationMins == 10080 && snapshot.sevenDay?.resetsAt == Formatters.parseISO8601(weekReset), "oauth 7d")
+        let raw = String(decoding: try Data(contentsOf: cache), as: UTF8.self)
+        try expect(!raw.contains("utilization") && !raw.contains("extra_usage"), "cache stays quota-only")
+        let kept = try Data(contentsOf: cache)
+        let absent = try ClaudeCodeStatusLine.captureOAuth(Data(#"{"five_hour":{"utilization":null,"resets_at":"\#(fiveReset)"},"seven_day":{"utilization":"","resets_at":""}}"#.utf8), at: cache, now: now)
+        let afterAbsent = try Data(contentsOf: cache)
+        try expect(absent == nil && afterAbsent == kept, "null or blank utilization is unavailable")
+        let zero = try unwrap(ClaudeCodeStatusLine.captureOAuth(Data(#"{"five_hour":{"utilization":0,"resets_at":null},"seven_day":null}"#.utf8), at: cache, now: now), "zero")
+        try expect(zero.fiveHour?.usedPercent == 0 && zero.fiveHour?.resetsAt == nil && zero.sevenDay == nil, "zero is a reading")
+        let good = try Data(contentsOf: cache)
+        for bad in [
+            "{",
+            #"{"five_hour":{"utilization":true,"resets_at":"\#(fiveReset)"}}"#,
+            #"{"five_hour":{"utilization":-1,"resets_at":"\#(fiveReset)"}}"#,
+            #"{"five_hour":{"utilization":5,"resets_at":"not-a-date"}}"#,
+            #"{"five_hour":{"utilization":5,"resets_at":true}}"#,
+            #"{"five_hour":{"utilization":5,"resets_at":-1}}"#,
+            #"{"five_hour":{"utilization":5,"resets_at":1e20}}"#
+        ] {
+            do { _ = try ClaudeCodeStatusLine.captureOAuth(Data(bad.utf8), at: cache, now: now) }
+            catch {
+                let after = try Data(contentsOf: cache)
+                try expect(after == good && error.localizedDescription == "Claude usage data was rejected.", "rejected oauth keeps cache")
+                continue
+            }
+            throw CodexUsageError.invalidResponse("malformed oauth usage should fail")
+        }
+
+        final class Probe: @unchecked Sendable {
+            var now = Date(timeIntervalSince1970: 1_790_000_000)
+            var calls = 0
+            var status = 200
+            var body = Data()
+            var retryAfter: String?
+        }
+        let probe = Probe()
+        probe.body = Data(live.utf8)
+        let source = ClaudeCodeUsageSource(cacheURL: cache, now: { probe.now }, readToken: { "fixture" }, fetch: { _ in
+            probe.calls += 1
+            let headers = probe.retryAfter.map { ["Retry-After": $0] }
+            let response = try unwrap(HTTPURLResponse(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!, statusCode: probe.status, httpVersion: nil, headerFields: headers), "response")
+            return (probe.body, response)
+        })
+        let fetched = try unwrap(await source.refresh(force: true), "network usage")
+        try expect(fetched.fiveHour?.usedPercent == 5 && probe.calls == 1, "source writes a valid snapshot")
+        let cooled = try await source.refresh(force: false)
+        try expect(cooled == nil && probe.calls == 1, "five minute throttle")
+        probe.now = probe.now.addingTimeInterval(60)
+        let saved = try Data(contentsOf: cache)
+        probe.body = Data("{".utf8)
+        var rejected = false
+        do { _ = try await source.refresh(force: true) } catch ClaudeUsageSourceError.rejected { rejected = true }
+        let afterReject = try Data(contentsOf: cache)
+        try expect(rejected && afterReject == saved && probe.calls == 2, "source keeps cache when the body is rejected")
+        probe.status = 429
+        probe.retryAfter = "1"
+        probe.body = Data("secret".utf8)
+        var limited = false
+        do { _ = try await source.refresh(force: true) } catch ClaudeUsageSourceError.rateLimited { limited = true }
+        let blocked = try await source.refresh(force: true)
+        let afterLimit = try Data(contentsOf: cache)
+        try expect(limited && blocked == nil && probe.calls == 3 && afterLimit == saved, "429 blocks force and keeps cache")
+        probe.now = probe.now.addingTimeInterval(300)
+        let retryAt = probe.now.addingTimeInterval(900)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss z"
+        probe.retryAfter = formatter.string(from: retryAt)
+        do { _ = try await source.refresh(force: true) } catch ClaudeUsageSourceError.rateLimited {}
+        probe.now = probe.now.addingTimeInterval(301)
+        let dateBlocked = try await source.refresh(force: true)
+        try expect(dateBlocked == nil && probe.calls == 4, "HTTP-date Retry-After must hold beyond five minutes")
+        probe.now = retryAt
+        probe.status = 200
+        probe.body = Data(live.utf8)
+        let recovered = try await source.refresh(force: false)
+        try expect(recovered?.fiveHour?.usedPercent == 5 && probe.calls == 5, "request resumes when Retry-After ends")
     }
 
     private func testClaudeCodeTokenHistory() throws {

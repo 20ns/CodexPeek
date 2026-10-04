@@ -27,6 +27,11 @@ enum ClaudeCodeStatusLine {
         return snapshot(stored, now: now)
     }
 
+    /// OAuth `/api/oauth/usage` JSON, normalized into the statusline cache shape before `capture`.
+    static func captureOAuth(_ data: Data, at url: URL = cacheURL, now: Date = Date()) throws -> ClaudeCodeUsageSnapshot? {
+        try capture(try canonicalUsage(data), at: url, now: now)
+    }
+
     static func load(from url: URL = cacheURL, now: Date = Date()) throws -> ClaudeCodeUsageSnapshot? {
         guard let stored = try readCache(url) else { return nil }
         return snapshot(stored, now: now)
@@ -93,6 +98,48 @@ enum ClaudeCodeStatusLine {
         var errorDescription: String? {
             self == .rejected ? "Claude usage data was rejected." : "Claude local usage could not be installed."
         }
+    }
+
+    private static func canonicalUsage(_ data: Data) throws -> Data {
+        let root: [String: Any]
+        do {
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.rejected }
+            root = object
+        } catch let error as Failure {
+            throw error
+        } catch { throw Failure.rejected }
+        if root["rate_limits"] != nil { return data }
+        var limits: [String: Any] = [:]
+        for key in ["five_hour", "seven_day"] {
+            if let window = try canonicalWindow(root[key]) { limits[key] = window }
+        }
+        do { return try JSONSerialization.data(withJSONObject: ["rate_limits": limits]) } catch { throw Failure.rejected }
+    }
+
+    /// Missing, null, or blank utilization stays absent so capture does not turn it into 0.
+    private static func canonicalWindow(_ raw: Any?) throws -> [String: Any]? {
+        guard let raw, !(raw is NSNull) else { return nil }
+        guard let object = raw as? [String: Any] else { throw Failure.rejected }
+        var window: [String: Any] = [:]
+        if let usage = object["utilization"] ?? object["used_percentage"], !(usage is NSNull) {
+            if let text = usage as? String {
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { window["used_percentage"] = usage }
+            } else {
+                window["used_percentage"] = usage
+            }
+        }
+        if let reset = object["resets_at"], !(reset is NSNull) {
+            if let text = reset as? String {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    guard let date = Formatters.parseISO8601(trimmed) else { throw Failure.rejected }
+                    window["resets_at"] = date.timeIntervalSince1970
+                }
+            } else {
+                window["resets_at"] = reset
+            }
+        }
+        return window.isEmpty ? nil : window
     }
 
     private static func incomingWindows(_ data: Data) throws -> Incoming? {

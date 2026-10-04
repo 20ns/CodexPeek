@@ -46,7 +46,7 @@ Measured locally on Apple silicon during development:
 - Idle CPU: effectively `0%`
 - Idle memory: about `33 MB` in the latest short `top` sample
 - Codex limits and token estimates refresh every five minutes in the background. Refresh Usage pulls immediately and restarts the five-minute wait. Startup and explicit account switches also load usage. Opening menus or history, waking the Mac and auth-file writes do not pull usage.
-- Claude limits update from local status-line events without network polling
+- Claude limits refresh every five minutes from the signed-in Claude Code account, with local status-line events updating them between refreshes
 - Token estimates refresh every five minutes off the main thread, reusing cached records for unchanged session files
 
 ## macOS Only
@@ -128,17 +128,25 @@ If live refresh fails, it falls back in this order:
 
 Token history refreshes every five minutes and on manual refresh. Cost estimates use the [OpenAI API pricing table](https://developers.openai.com/api/docs/pricing), including Fast and long-context rates. These are API-equivalent estimates, not subscription charges. Models without a known rate remain unpriced.
 
-Claude quota bars use the [documented Claude Code status-line data](https://code.claude.com/docs/en/statusline#rate-limit-usage). Choose `Enable Claude local usage` once, then use Claude Code normally. The app installs a local status-line helper and preserves any existing status-line command and other settings. It backs up settings before the first edit. No Anthropic credentials, Keychain access or extra usage requests are involved.
+Claude quota bars read the signed-in Claude Code account's usage endpoint on startup, every five minutes and when you choose Refresh Usage. This also works with Claude Code app and SDK sessions that do not render a terminal status line. Credentials are read from `CLAUDE_CODE_OAUTH_TOKEN`, the configured `.credentials.json` or the macOS `Claude Code-credentials` Keychain entry. Tokens stay in memory and are sent only to Anthropic. The app does not refresh tokens or change Claude's login. If authentication expires, sign in again through Claude Code.
 
-Readings arrive after Claude Code activity. The app shows the last update time, marks readings stale after five minutes and hides windows after their reset until a new reading arrives. Missing data is shown as waiting, never as zero usage or an exhausted quota. The five-hour and weekly fields require a Pro or Max subscription and may be absent before the first response. The cost estimator uses retained local logs independently.
+The optional [Claude Code status-line bridge](https://code.claude.com/docs/en/statusline#rate-limit-usage) can update quota readings between account refreshes. Choose `Enable Claude local usage` to install it. The installer preserves an existing status-line command and other settings, and backs up settings before the first edit. Terminal readings require supported subscription data and a response in the session.
 
-To enable the bridge from a built app:
+The app retains the last valid reading when a request fails, shows its age and reports the failure. It marks readings stale after five minutes and removes each window after its reset until another reading arrives. Missing data remains unavailable. Rate-limited requests wait at least five minutes and respect longer server retry delays. Token cost estimates use retained local logs independently.
+
+To enable the optional bridge from a built app:
 
 ```sh
 .build/CodexPeek.app/Contents/MacOS/CodexPeek --setup-claude-statusline
 ```
 
-The helper and `codexpeek-usage.json` live in `~/.claude`, or `CLAUDE_CONFIG_DIR` when set. The usage file contains only percentages, reset times and the observation time.
+To fetch and verify account usage:
+
+```sh
+.build/CodexPeek.app/Contents/MacOS/CodexPeek --refresh-claude-usage
+```
+
+The helper and `codexpeek-usage.json` live in `~/.claude`, or `CLAUDE_CONFIG_DIR` when set. The usage file contains only percentages, reset times and the observation time. The account endpoint is also used by Claude Code but is not a documented public API, so changes to it may require an app update.
 
 Account identity also falls back to local `~/.codex/auth.json` metadata so the signed-in label remains useful even when usage data is stale.
 

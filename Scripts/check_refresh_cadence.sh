@@ -26,6 +26,18 @@ cat > "$CHECK_DIR/main.swift" <<'SWIFT'
 import AppKit
 import Foundation
 
+// Replace only account IO; exercise the real Claude controller callbacks offline.
+@MainActor final class ClaudeCodeUsageSource {
+    var calls = 0
+    var nextSnapshot: ClaudeCodeUsageSnapshot?
+    var failure = false
+    func refresh(force: Bool = false) async throws -> ClaudeCodeUsageSnapshot? {
+        calls += 1
+        if failure { throw CodexUsageError.timedOut }
+        return nextSnapshot
+    }
+}
+
 final class CountingSource: CodexUsageLiveSource, @unchecked Sendable {
     private let lock = NSLock()
     private var calls = 0
@@ -105,13 +117,45 @@ while controller.tokenReportTask != nil && Date() < tokenDeadline {
 }
 precondition(controller.tokenReportTask == nil && controller.tokenReport != nil,
              "Token refresh must start without a startup sleep")
+
+@MainActor func settleClaude() {
+    let deadline = Date().addingTimeInterval(2)
+    while controller.claudeUsageTask != nil && Date() < deadline {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+    }
+    precondition(controller.claudeUsageTask == nil, "Claude refresh did not complete")
+}
+settleClaude()
+let observed = Date()
+let payload = "{\"rate_limits\":{\"five_hour\":{\"used_percentage\":5,\"resets_at\":\(observed.timeIntervalSince1970 + 3600)}}}"
+let fresh = try ClaudeCodeStatusLine.capture(Data(payload.utf8), now: observed)!
+controller.claudeUsageSource.nextSnapshot = fresh
+controller.refreshClaudeAccountUsage(force: true)
+settleClaude()
+precondition(controller.claudeSnapshot == fresh && controller.claudeUsageError == nil,
+             "Account usage must populate Claude bars without statusline activity")
+precondition(!controller.claudeFiveHourItem.isHidden && controller.claudeWeeklyItem.isHidden,
+             "Received quota must be visible and unknown windows must stay unavailable")
+let calls = controller.claudeUsageSource.calls
+controller.menuWillOpen(NSMenu())
+precondition(controller.claudeUsageSource.calls == calls, "Opening the menu must not request account usage")
+controller.claudeUsageSource.failure = true
+controller.refreshClaudeAccountUsage(force: true)
+settleClaude()
+precondition(controller.claudeSnapshot?.fiveHour?.usedPercent == 5 && controller.claudeSnapshot?.isStale == true,
+             "An account failure must retain the last valid quota")
+let failure = controller.claudeUsageError
+controller.menuWillOpen(NSMenu())
+precondition(failure != nil && controller.claudeUsageError == failure,
+             "Opening the menu must preserve the account failure")
+precondition(controller.claudeSnapshot?.isStale == true, "A failed reading must remain marked stale")
 print("Refresh cadence checks passed.")
 SWIFT
 
 sources=()
 while IFS= read -r file; do
   case "${file:t}" in
-    main.swift|AppController.swift|AccountProfiles.swift) continue ;;
+    main.swift|AppController.swift|AccountProfiles.swift|ClaudeCodeUsageSource.swift|SelfTestRunner.swift) continue ;;
   esac
   sources+=("$file")
 done < <(rg --files "$ROOT_DIR/Sources/CodexPeek" -g '*.swift')
