@@ -17,6 +17,7 @@ struct SelfTestRunner {
         try testClaudeCodeUsage()
         try await testClaudeOAuthUsage()
         try testClaudeCredentials()
+        try testSessionIndexStore()
         try testClaudeCodeTokenHistory()
         try testLegacyClaudeBackfill()
         try testUsageComparisons()
@@ -226,7 +227,7 @@ struct SelfTestRunner {
         try FileManager.default.moveItem(at: active, to: archived.appendingPathComponent("rollout.jsonl"))
         let after = try source.usageReport()
         try expect(after.allTime == before.allTime, "archiving should preserve totals with a cached index")
-        if let zstd = CodexTokenUsageSource.zstdURL {
+        if let zstd = LogLines.zstdURL {
             let plain = archived.appendingPathComponent("rollout.jsonl")
             let compress = try Process.run(zstd, arguments: ["-q", plain.path])
             compress.waitUntilExit()
@@ -388,6 +389,28 @@ struct SelfTestRunner {
             let untouched = try Data(contentsOf: settingsURL)
             try expect(failed && untouched == Data(bad.utf8), "invalid settings stay untouched")
         }
+    }
+
+    private func testSessionIndexStore() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("index.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var index = TokenUsageSessionIndex()
+        index.sessions["a"] = IndexedSessionUsage(path: "a", size: 1, modifiedAt: Date(timeIntervalSince1970: 1), session: nil)
+        let store = TokenUsageSessionIndexStore(cacheURL: url)
+        try store.save(index)
+        let persisted = try TokenUsageSessionIndexStore(cacheURL: url).load()
+        try expect(persisted?.sessions["a"]?.size == 1, "first save must reach disk for the next launch")
+        index.sessions["b"] = index.sessions["a"]
+        try store.save(index)
+        let live = try store.load()
+        let onDisk = try TokenUsageSessionIndexStore(cacheURL: url).load()
+        try expect(live?.sessions.count == 2, "the live index must come from memory")
+        try expect(onDisk?.sessions.count == 1, "later saves are throttled")
+        try Data(#"{"schemaVersion":10,"sessions":{}}"#.utf8).write(to: url)
+        do {
+            _ = try TokenUsageSessionIndexStore(cacheURL: url).load()
+            throw CodexUsageError.invalidResponse("an old JSON index must not load")
+        } catch is DecodingError {}
     }
 
     private func testClaudeCredentials() throws {

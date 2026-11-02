@@ -100,7 +100,7 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
                 options: [.skipsHiddenFiles]
             ) else { continue }
             for case let fileURL as URL in enumerator
-            where fileURL.pathExtension == "jsonl" || (Self.zstdURL != nil && fileURL.path.hasSuffix(".jsonl.zst")) {
+            where fileURL.pathExtension == "jsonl" || (LogLines.zstdURL != nil && fileURL.path.hasSuffix(".jsonl.zst")) {
                 let values = try fileURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
                 files.append(SessionLogFile(
                     url: fileURL,
@@ -114,27 +114,6 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         // Skip an archive whose plain log still exists, e.g. while Codex is compressing it.
         let plain = Set(files.filter { $0.url.pathExtension == "jsonl" }.map(\.path))
         return files.filter { $0.url.pathExtension != "zst" || !plain.contains(String($0.path.dropLast(4))) }
-    }
-
-    // ponytail: macOS ships no zstd decoder, so Codex's compressed `.jsonl.zst` logs need the zstd CLI
-    // and are left out without it. Vendoring libzstd would drop that requirement.
-    static let zstdURL = ["/opt/homebrew/bin/zstd", "/usr/local/bin/zstd", "/opt/local/bin/zstd"]
-        .first(where: FileManager.default.isExecutableFile(atPath:))
-        .map { URL(fileURLWithPath: $0) }
-
-    private static func logData(at url: URL) throws -> Data? {
-        guard url.pathExtension == "zst" else { return try Data(contentsOf: url, options: .mappedIfSafe) }
-        guard let zstdURL else { return nil }
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = zstdURL
-        process.arguments = ["-dcq", "--", url.path]
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return nil }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return process.terminationStatus == 0 ? data : nil
     }
 
     private func add(
@@ -175,7 +154,6 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     }
 
     private func sessionUsage(from fileURL: URL, fallbackTimestamp: Date) throws -> SessionUsage? {
-        guard let data = try Self.logData(at: fileURL) else { return nil }
         let decoder = JSONDecoder()
         var buckets: [TokenUsageBucket] = []
         var previousUsage = TokenUsagePayload.zero
@@ -184,16 +162,9 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         var sawSessionMetadata = false
         var includeUsage = true
         var inheritedUsageCutoff: Date?
-        var lineStart = data.startIndex
 
-        while lineStart < data.endIndex {
-            let lineEnd = data[lineStart...].firstIndex(of: 10) ?? data.endIndex
-            let line = data[lineStart..<lineEnd]
-            defer {
-                lineStart = lineEnd < data.endIndex ? data.index(after: lineEnd) : data.endIndex
-            }
-            guard Self.relevantLogMarkers.contains(where: { line.range(of: $0) != nil }),
-                  let entry = try? decoder.decode(TokenUsageLogEntry.self, from: line) else { continue }
+        let readable = try LogLines.forEach(in: fileURL, matching: Self.relevantLogMarkers) { line, _ in
+            guard let entry = try? decoder.decode(TokenUsageLogEntry.self, from: line) else { return }
 
             if entry.type == "session_meta", !sawSessionMetadata {
                 sawSessionMetadata = true
@@ -217,10 +188,10 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
                 previousUsage = usage
                 let timestamp = entry.timestamp.flatMap(Formatters.parseISO8601) ?? fallbackTimestamp
                 // ponytail: copied fork rows retain timestamps; ordinal boundaries are needed if that format changes.
-                if let inheritedUsageCutoff, timestamp <= inheritedUsageCutoff { continue }
+                if let inheritedUsageCutoff, timestamp <= inheritedUsageCutoff { return }
                 guard includeUsage,
                       let incrementalUsage = info.lastTokenUsage?.isConsistent == true ? info.lastTokenUsage : delta,
-                      incrementalUsage.totalTokens > 0 else { continue }
+                      incrementalUsage.totalTokens > 0 else { return }
 
                 let interval = Date(timeIntervalSince1970: floor(timestamp.timeIntervalSince1970 / 900) * 900)
                 let usesChatGPTCredits = entry.payload?.rateLimits.map { $0.planType != nil }
@@ -246,15 +217,21 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
             }
         }
 
+        guard readable else { return nil }
         return buckets.isEmpty ? nil : SessionUsage(buckets: buckets)
     }
 }
 
 final class TokenUsageSessionIndexStore: TokenUsageSessionIndexStoring, @unchecked Sendable {
+    // A JSON index cost ~0.4s and ~220 MB of footprint per scan. It is now a binary plist (half the size,
+    // a third of the decode memory) held in memory between scans; the disk copy only seeds the next launch,
+    // and a stale one just reparses the files changed since. Older JSON indexes fail to decode and rebuild once.
+    private static let writeInterval: TimeInterval = 30 * 60
     private let cacheURL: URL
     private let fileManager: FileManager
-    private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
+    private let lock = NSLock()
+    private var memory: TokenUsageSessionIndex?
+    private var lastWrite = Date.distantPast
 
     init(
         cacheURL: URL = TokenUsageSessionIndexStore.defaultCacheURL(),
@@ -265,23 +242,33 @@ final class TokenUsageSessionIndexStore: TokenUsageSessionIndexStoring, @uncheck
     }
 
     func load() throws -> TokenUsageSessionIndex? {
+        if let memory = lock.withLock({ memory }) { return memory }
         guard fileManager.fileExists(atPath: cacheURL.path) else {
             return nil
         }
 
         let data = try Data(contentsOf: cacheURL)
-        let index = try decoder.decode(TokenUsageSessionIndex.self, from: data)
-        return index.schemaVersion == TokenUsageSessionIndex.schemaVersion ? index : nil
+        let index = try PropertyListDecoder().decode(TokenUsageSessionIndex.self, from: data)
+        guard index.schemaVersion == TokenUsageSessionIndex.schemaVersion else { return nil }
+        lock.withLock { memory = index }
+        return index
     }
 
     func save(_ index: TokenUsageSessionIndex) throws {
+        let now = Date()
+        let due = lock.withLock {
+            memory = index
+            return now.timeIntervalSince(lastWrite) >= Self.writeInterval
+        }
+        guard due else { return }
         try fileManager.createDirectory(
             at: cacheURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-
-        let data = try encoder.encode(index)
-        try data.write(to: cacheURL, options: .atomic)
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        try encoder.encode(index).write(to: cacheURL, options: .atomic)
+        lock.withLock { lastWrite = now }
     }
 
     static func defaultCacheURL(profileID: String = "default") -> URL {
@@ -553,6 +540,78 @@ struct TokenPricingCatalog: Sendable {
         }
 
         return snapshotPrices.first { normalized.hasPrefix($0.prefix) }?.price
+    }
+}
+
+/// Streams session logs line by line, so multi-gigabyte histories never sit in memory whole.
+enum LogLines {
+    // ponytail: macOS ships no zstd decoder, so Codex's compressed `.jsonl.zst` logs need the zstd CLI
+    // and are left out without it. Vendoring libzstd would drop that requirement.
+    static let zstdURL = ["/opt/homebrew/bin/zstd", "/usr/local/bin/zstd", "/opt/local/bin/zstd"]
+        .first(where: FileManager.default.isExecutableFile(atPath:))
+        .map { URL(fileURLWithPath: $0) }
+
+    /// Calls `body` with each line containing any marker and its 1-based line number.
+    /// Returns false when the log cannot be read, e.g. a `.zst` archive without zstd or a failed decompression.
+    @discardableResult
+    static func forEach(in url: URL, matching markers: [Data], _ body: (Data, Int) throws -> Void) throws -> Bool {
+        var process: Process?
+        // waitUntilExit polls the run loop; a termination signal wakes as soon as zstd exits.
+        let exited = DispatchSemaphore(value: 0)
+        let handle: FileHandle
+        if url.pathExtension == "zst" {
+            guard let zstdURL else { return false }
+            let zstd = Process()
+            let output = Pipe()
+            zstd.executableURL = zstdURL
+            zstd.arguments = ["-dcq", "--", url.path]
+            zstd.standardOutput = output
+            zstd.standardError = FileHandle.nullDevice
+            zstd.terminationHandler = { _ in exited.signal() }
+            guard (try? zstd.run()) != nil else { return false }
+            process = zstd
+            handle = output.fileHandleForReading
+        } else {
+            handle = try FileHandle(forReadingFrom: url)
+        }
+        defer {
+            try? handle.close()
+            if let process, process.isRunning { process.terminate() }
+        }
+
+        var buffer = Data()
+        var lineNumber = 0
+        var atEnd = false
+        while !atEnd {
+            // read(upToCount:) autoreleases each chunk; without a pool per chunk a 100 MB log stays resident.
+            try autoreleasepool {
+                let chunk = try handle.read(upToCount: 1 << 20) ?? Data()
+                atEnd = chunk.isEmpty
+                buffer.append(chunk)
+                let consumed = try buffer.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Int in
+                    guard let base = raw.baseAddress else { return 0 }
+                    var start = 0
+                    while start < raw.count {
+                        let newline = memchr(base + start, 10, raw.count - start)
+                        guard newline != nil || atEnd else { break }
+                        let end = newline.map { base.distance(to: UnsafeRawPointer($0)) } ?? raw.count
+                        lineNumber += 1
+                        let line = UnsafeRawBufferPointer(rebasing: raw[start..<end])
+                        if markers.contains(where: { marker in
+                            marker.withUnsafeBytes { memmem(line.baseAddress, line.count, $0.baseAddress, $0.count) != nil }
+                        }) {
+                            try body(Data(line), lineNumber)
+                        }
+                        start = end + 1
+                    }
+                    return min(start, raw.count)
+                }
+                buffer.removeSubrange(0..<consumed)
+            }
+        }
+        guard let process else { return true }
+        exited.wait()
+        return process.terminationStatus == 0
     }
 }
 

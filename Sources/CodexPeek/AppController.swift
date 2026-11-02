@@ -126,6 +126,10 @@ final class AppController: NSObject, NSMenuDelegate {
         } catch {
             refreshState = .failed("Failed to load account profiles")
         }
+        // Codex off still shows its cached history; nothing scans, polls or watches Codex.
+        if !codexEnabled, let profileID = try? accountStore.loadState().activeProfileID {
+            tokenReport = try? TokenUsageReportCacheStore(cacheURL: TokenUsageReportCacheStore.defaultCacheURL(profileID: profileID)).load()
+        }
 
         render()
 
@@ -232,8 +236,8 @@ final class AppController: NSObject, NSMenuDelegate {
             )
         }
         usageHistoryWindowController?.show(
-            report: codexEnabled ? tokenReport : nil,
-            claudeReport: claudeEnabled ? claudeTokenReport : nil,
+            report: tokenReport,
+            claudeReport: claudeTokenReport,
             planHistory: planHistory,
             snapshot: snapshot,
             accountPlan: activeAccountSnapshot?.planType ?? .unknown
@@ -713,7 +717,7 @@ final class AppController: NSObject, NSMenuDelegate {
         if hasBothWindows {
             let sessionTitle = UIFormatters.rateLimitWindowTitle(for: sessionWindow, fallback: "5-hour window")
             let weeklyTitle = UIFormatters.rateLimitWindowTitle(for: weeklyWindow, fallback: "Weekly window")
-            let overrideDetail = isWeeklyExhausted ? "Weekly limit reached • 5-hour window resumes after the weekly reset" : nil
+            let overrideDetail = isWeeklyExhausted ? "Weekly limit reached • resumes after the weekly reset" : nil
 
             primaryUsageView.update(
                 title: sessionTitle,
@@ -776,8 +780,8 @@ final class AppController: NSObject, NSMenuDelegate {
         claudeToggleItem.isEnabled = primaryProvider != .claude
         statusView.update(snapshot: snapshot, refreshState: refreshState, accountStatus: accountStatusMessage())
         usageHistoryWindowController?.update(
-            report: codexEnabled ? tokenReport : nil,
-            claudeReport: claudeEnabled ? claudeTokenReport : nil,
+            report: tokenReport,
+            claudeReport: claudeTokenReport,
             planHistory: planHistory,
             snapshot: snapshot,
             accountPlan: activeAccountSnapshot?.planType ?? .unknown

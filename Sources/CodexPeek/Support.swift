@@ -41,15 +41,12 @@ enum CodexUsageError: LocalizedError, Equatable {
 }
 
 enum Formatters {
-    static func parseISO8601(_ value: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: value) {
-            return date
-        }
+    // Reused styles: building a date formatter per call dominated log scans.
+    private static let fractionalISO8601 = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    private static let wholeISO8601 = Date.ISO8601FormatStyle()
 
-        let formatter = ISO8601DateFormatter()
-        return formatter.date(from: value)
+    static func parseISO8601(_ value: String) -> Date? {
+        (try? fractionalISO8601.parse(value)) ?? (try? wholeISO8601.parse(value))
     }
 }
 

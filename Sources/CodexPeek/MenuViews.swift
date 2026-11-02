@@ -1,5 +1,12 @@
 import AppKit
 
+private enum Metrics {
+    static let width: CGFloat = 320
+    static let inset: CGFloat = 14
+    /// Icon buttons are 22pt around a ~12pt glyph; pulling them out by this much lines the glyph up with the content edge.
+    static let iconInset: CGFloat = inset - 5
+}
+
 @MainActor
 final class HeaderMenuItemView: NSView {
     private let titleField = NSTextField(labelWithString: "")
@@ -10,7 +17,7 @@ final class HeaderMenuItemView: NSView {
     var onCopyDebugInfo: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 52))
+        super.init(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: 52))
         translatesAutoresizingMaskIntoConstraints = false
         setup()
     }
@@ -46,13 +53,14 @@ final class HeaderMenuItemView: NSView {
         }
 
         subtitleField.stringValue = detail
+        subtitleField.toolTip = detail
     }
 
     private func setup() {
         let stack = NSStackView(views: [titleField, subtitleField])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 3
+        stack.spacing = 2
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         titleField.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -70,22 +78,20 @@ final class HeaderMenuItemView: NSView {
         let controls = NSStackView(views: [refreshButton, copyButton])
         controls.orientation = .horizontal
         controls.alignment = .centerY
-        controls.spacing = 6
+        controls.spacing = 2
         controls.translatesAutoresizingMaskIntoConstraints = false
 
-        let row = NSStackView(views: [stack, controls])
-        row.orientation = .horizontal
-        row.alignment = .top
-        row.spacing = 8
-        row.translatesAutoresizingMaskIntoConstraints = false
-
-        addSubview(row)
+        addSubview(stack)
+        addSubview(controls)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 320),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            row.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10)
+            widthAnchor.constraint(equalToConstant: Metrics.width),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Metrics.inset),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: controls.leadingAnchor, constant: -8),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            // Buttons sit on the title line, as in the Claude section header.
+            controls.centerYAnchor.constraint(equalTo: titleField.centerYAnchor),
+            controls.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Metrics.iconInset)
         ])
     }
 
@@ -100,11 +106,14 @@ final class HeaderMenuItemView: NSView {
 
 @MainActor
 private func configureIconButton(_ button: NSButton, symbolName: String, tooltip: String, target: AnyObject, action: Selector) {
-    button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: tooltip)
+    let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+    button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: tooltip)?.withSymbolConfiguration(config)
+    button.contentTintColor = .secondaryLabelColor
     button.bezelStyle = .inline
     button.isBordered = false
     button.imagePosition = .imageOnly
     button.toolTip = tooltip
+    button.setAccessibilityLabel(tooltip)
     button.target = target
     button.action = action
     button.setButtonType(.momentaryChange)
@@ -115,14 +124,21 @@ private func configureIconButton(_ button: NSButton, symbolName: String, tooltip
     ])
 }
 
+/// Title and used-percentage on one line, the bar, then a quiet detail line.
+/// Subclasses only pick the tint and decide what the detail says.
 @MainActor
-final class UsageMenuItemView: NSView {
+class UsageRowView: NSView {
     private let titleField = NSTextField(labelWithString: "")
+    private let percentField = NSTextField(labelWithString: "")
     private let detailField = NSTextField(labelWithString: "")
-    private let bar = UsageBarView(tint: .systemBlue)
+    private let bar = UsageBarView()
+    /// Optional trailing note on the detail line (Spark's weekly percentage).
+    fileprivate let noteField = NSTextField(labelWithString: "")
+
+    class var tint: NSColor { .systemBlue }
 
     override init(frame frameRect: NSRect) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 64))
+        super.init(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: 65))
         translatesAutoresizingMaskIntoConstraints = false
         setup()
     }
@@ -131,167 +147,137 @@ final class UsageMenuItemView: NSView {
         nil
     }
 
-    func update(title: String, window: RateLimitWindowSnapshot?, isDimmed: Bool = false, overrideDetail: String? = nil) {
+    fileprivate func render(title: String, window: RateLimitWindowSnapshot?, detail: String) {
         titleField.stringValue = title
+        percentField.attributedStringValue = Self.percentText(window?.usedPercent)
+        detailField.stringValue = detail
+        detailField.toolTip = detail
 
         bar.fraction = window.map { CGFloat($0.usedPercent) / 100 }
         bar.pace = window?.weeklyPace().map { CGFloat($0) }
         bar.setAccessibilityLabel(title)
         bar.setAccessibilityValue(window?.usedPercent)
         bar.setAccessibilityValueDescription(window == nil ? "Unavailable" : nil)
+    }
 
-        if let overrideDetail {
-            detailField.stringValue = overrideDetail
-        } else if let window {
-            if let resetDate = window.resetsAt {
-                detailField.stringValue = "\(window.usedPercent)% used • \(UIFormatters.usageResetCountdownString(from: resetDate))"
-            } else {
-                detailField.stringValue = "\(window.usedPercent)% used • reset unavailable"
-            }
-        } else {
-            detailField.stringValue = "Unavailable"
+    fileprivate func setDimmed(_ isDimmed: Bool) {
+        alphaValue = isDimmed ? 0.45 : 1
+    }
+
+    fileprivate static func resetDetail(for window: RateLimitWindowSnapshot?) -> String {
+        guard let window else { return "Unavailable" }
+        return window.resetsAt.map { UIFormatters.usageResetCountdownString(from: $0) } ?? "Reset unavailable"
+    }
+
+    private static func percentText(_ percent: Int?) -> NSAttributedString {
+        guard let percent else {
+            return NSAttributedString(string: "—", attributes: [.font: NSFont.systemFont(ofSize: 14, weight: .semibold), .foregroundColor: NSColor.tertiaryLabelColor])
         }
-
-        let alpha: CGFloat = isDimmed ? 0.45 : 1.0
-        titleField.alphaValue = alpha
-        bar.alphaValue = alpha
-        detailField.alphaValue = alpha
+        let text = NSMutableAttributedString(string: "\(percent)%", attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 14, weight: .semibold),
+            .foregroundColor: NSColor.labelColor
+        ])
+        text.append(NSAttributedString(string: " used", attributes: [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ]))
+        return text
     }
 
     private func setup() {
-        titleField.font = .systemFont(ofSize: 12, weight: .semibold)
+        bar.tint = Self.tint
+        titleField.font = .systemFont(ofSize: 12, weight: .medium)
+        titleField.lineBreakMode = .byTruncatingTail
+        titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        percentField.maximumNumberOfLines = 1
+        percentField.setContentHuggingPriority(.required, for: .horizontal)
+        percentField.setContentCompressionResistancePriority(.required, for: .horizontal)
         detailField.font = .systemFont(ofSize: 11)
         detailField.textColor = .secondaryLabelColor
         detailField.lineBreakMode = .byTruncatingTail
-        detailField.maximumNumberOfLines = 1
         detailField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        noteField.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        noteField.isHidden = true
+        noteField.setContentHuggingPriority(.required, for: .horizontal)
+        noteField.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        bar.translatesAutoresizingMaskIntoConstraints = false
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let titleRow = NSStackView(views: [titleField, spacer, percentField])
+        titleRow.alignment = .firstBaseline
+        titleRow.spacing = 8
+        let detailSpacer = NSView()
+        detailSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let detailRow = NSStackView(views: [detailField, detailSpacer, noteField])
+        detailRow.alignment = .firstBaseline
+        detailRow.spacing = 8
 
-        let stack = NSStackView(views: [titleField, bar, detailField])
+        let stack = NSStackView(views: [titleRow, bar, detailRow])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 6
+        stack.spacing = 3
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(stack)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 320),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-            bar.widthAnchor.constraint(equalToConstant: 290),
-            bar.heightAnchor.constraint(equalToConstant: 6)
+            widthAnchor.constraint(equalToConstant: Metrics.width),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Metrics.inset),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Metrics.inset),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 9),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9),
+            titleRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            bar.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            detailRow.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
     }
 }
 
 @MainActor
-final class CompactSupplementalUsageMenuItemView: NSView {
-    private let titleField = NSTextField(labelWithString: "")
-    private let detailField = NSTextField(labelWithString: "")
-    private let weeklyField = NSTextField(labelWithString: "")
-    private let bar = UsageBarView(tint: .systemBlue)
-    private let detailSpacer = NSView()
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 58))
-        translatesAutoresizingMaskIntoConstraints = false
-        setup()
+final class UsageMenuItemView: UsageRowView {
+    func update(title: String, window: RateLimitWindowSnapshot?, isDimmed: Bool = false, overrideDetail: String? = nil) {
+        render(title: title, window: window, detail: overrideDetail ?? Self.resetDetail(for: window))
+        setDimmed(isDimmed)
     }
+}
 
-    required init?(coder: NSCoder) {
-        nil
+@MainActor
+final class ClaudeUsageMenuItemView: UsageRowView {
+    override class var tint: NSColor { .systemOrange }
+
+    func update(title: String, window: RateLimitWindowSnapshot?) {
+        render(title: title, window: window, detail: Self.resetDetail(for: window))
     }
+}
 
+@MainActor
+final class CompactSupplementalUsageMenuItemView: UsageRowView {
     func update(snapshot: SupplementalRateLimitSnapshot?) {
-        titleField.stringValue = snapshot?.title ?? "5.3 Spark"
-
         let window = snapshot?.primary
-        bar.fraction = window.map { CGFloat($0.usedPercent) / 100 }
-        bar.setAccessibilityLabel(titleField.stringValue)
-        bar.setAccessibilityValue(window?.usedPercent)
-        bar.setAccessibilityValueDescription(window == nil ? "Unavailable" : nil)
-
-        if let snapshot {
-            if snapshot.isWeeklyExhausted {
-                detailField.stringValue = "Weekly limit reached"
-            } else if let primaryReset = snapshot.primary?.resetsAt {
-                let primaryPercent = snapshot.primary?.usedPercent ?? 0
-                detailField.stringValue = "\(primaryPercent)% used • \(UIFormatters.usageResetCountdownString(from: primaryReset))"
-            } else {
-                detailField.stringValue = "Unavailable"
-            }
-
-            if let weeklyPercent = snapshot.secondary?.usedPercent {
-                weeklyField.stringValue = "\(weeklyPercent)% wk"
-                weeklyField.textColor = color(for: UsageLevelResolver.resolve(for: weeklyPercent))
-                weeklyField.isHidden = false
-            } else {
-                weeklyField.stringValue = ""
-                weeklyField.isHidden = true
-            }
+        let detail: String
+        if snapshot?.isWeeklyExhausted == true {
+            detail = "Weekly limit reached"
+        } else if let snapshot, window?.resetsAt != nil {
+            detail = Self.resetDetail(for: snapshot.primary)
         } else {
-            detailField.stringValue = "Unavailable"
-            weeklyField.stringValue = ""
-            weeklyField.isHidden = true
+            detail = "Unavailable"
         }
-    }
+        render(title: snapshot?.title ?? "5.3 Spark", window: window, detail: detail)
 
-    private func setup() {
-        titleField.font = .systemFont(ofSize: 12, weight: .semibold)
-        detailField.font = .systemFont(ofSize: 11)
-        detailField.textColor = .secondaryLabelColor
-        weeklyField.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-        weeklyField.alignment = .right
-        weeklyField.setContentHuggingPriority(.required, for: .horizontal)
-        weeklyField.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        detailField.lineBreakMode = .byTruncatingTail
-        detailField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        detailSpacer.translatesAutoresizingMaskIntoConstraints = false
-        detailSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        detailSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        bar.translatesAutoresizingMaskIntoConstraints = false
-
-        let detailRow = NSStackView(views: [detailField, detailSpacer, weeklyField])
-        detailRow.orientation = .horizontal
-        detailRow.alignment = .firstBaseline
-        detailRow.spacing = 8
-        detailRow.distribution = .fill
-
-        let stack = NSStackView(views: [titleField, bar, detailRow])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 320),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 9),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9),
-            bar.widthAnchor.constraint(equalToConstant: 290),
-            bar.heightAnchor.constraint(equalToConstant: 6),
-            weeklyField.widthAnchor.constraint(greaterThanOrEqualToConstant: 48)
-        ])
+        if let weeklyPercent = snapshot?.secondary?.usedPercent {
+            noteField.stringValue = "\(weeklyPercent)% wk"
+            noteField.textColor = color(for: UsageLevelResolver.resolve(for: weeklyPercent))
+            noteField.isHidden = false
+        } else {
+            noteField.isHidden = true
+        }
     }
 
     private func color(for level: UsageLevel) -> NSColor {
         switch level {
-        case .normal:
-            return .systemGreen
-        case .warning:
-            return .systemOrange
-        case .critical:
-            return .systemRed
-        case .unavailable:
-            return .tertiaryLabelColor
+        case .normal: .systemGreen
+        case .warning: .systemOrange
+        case .critical: .systemRed
+        case .unavailable: .tertiaryLabelColor
         }
     }
 }
@@ -303,7 +289,7 @@ final class TokenCostMenuItemView: NSView {
     private let modelField = NSTextField(labelWithString: "")
 
     override init(frame frameRect: NSRect) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 54))
+        super.init(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: 49))
         translatesAutoresizingMaskIntoConstraints = false
         setup()
     }
@@ -339,7 +325,7 @@ final class TokenCostMenuItemView: NSView {
     }
 
     private func setup() {
-        titleField.font = .systemFont(ofSize: 12, weight: .semibold)
+        titleField.font = .systemFont(ofSize: 12, weight: .medium)
         detailField.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
         modelField.font = .systemFont(ofSize: 11)
         modelField.textColor = .secondaryLabelColor
@@ -358,9 +344,9 @@ final class TokenCostMenuItemView: NSView {
 
         addSubview(stack)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 320),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            widthAnchor.constraint(equalToConstant: Metrics.width),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Metrics.inset),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Metrics.inset),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8)
         ])
@@ -372,7 +358,7 @@ final class StatusMenuItemView: NSView {
     private let labelField = NSTextField(labelWithString: "")
 
     override init(frame frameRect: NSRect) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 34))
+        super.init(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: 24))
         translatesAutoresizingMaskIntoConstraints = false
         labelField.font = .systemFont(ofSize: 11)
         labelField.textColor = .secondaryLabelColor
@@ -383,10 +369,10 @@ final class StatusMenuItemView: NSView {
         addSubview(labelField)
 
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 320),
+            widthAnchor.constraint(equalToConstant: Metrics.width),
             heightAnchor.constraint(equalToConstant: 24),
-            labelField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            labelField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            labelField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Metrics.inset),
+            labelField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Metrics.inset),
             labelField.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
     }
@@ -424,6 +410,7 @@ final class StatusMenuItemView: NSView {
         }
 
         labelField.stringValue = status
+        labelField.toolTip = status
     }
 
     func update(message: String) {
@@ -439,9 +426,9 @@ final class MenuSectionHeaderView: NSView {
     var onRefresh: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 28))
+        super.init(frame: NSRect(x: 0, y: 0, width: Metrics.width, height: 28))
         translatesAutoresizingMaskIntoConstraints = false
-        labelField.font = .systemFont(ofSize: 12, weight: .semibold)
+        labelField.font = .systemFont(ofSize: 13, weight: .semibold)
         labelField.textColor = .labelColor
         labelField.translatesAutoresizingMaskIntoConstraints = false
         configureIconButton(refreshButton, symbolName: "arrow.clockwise", tooltip: "Refresh usage", target: self, action: #selector(refreshTapped))
@@ -449,12 +436,12 @@ final class MenuSectionHeaderView: NSView {
         addSubview(labelField)
         addSubview(refreshButton)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 320),
+            widthAnchor.constraint(equalToConstant: Metrics.width),
             heightAnchor.constraint(equalToConstant: 28),
-            labelField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            labelField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Metrics.inset),
             labelField.trailingAnchor.constraint(equalTo: refreshButton.leadingAnchor, constant: -8),
             labelField.centerYAnchor.constraint(equalTo: centerYAnchor),
-            refreshButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            refreshButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Metrics.iconInset),
             refreshButton.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
     }
@@ -476,7 +463,12 @@ final class MenuSectionHeaderView: NSView {
 
 @MainActor
 final class UsageBarView: NSView {
-    private let tint: NSColor
+    private static let barHeight: CGFloat = 6
+    private static let tickInset: CGFloat = 2 // tick extends this far above and below the bar
+
+    var tint: NSColor = .systemOrange {
+        didSet { needsDisplay = true }
+    }
     var fraction: CGFloat? {
         didSet { needsDisplay = true }
     }
@@ -502,7 +494,7 @@ final class UsageBarView: NSView {
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: 290, height: 6)
+        NSSize(width: NSView.noIntrinsicMetric, height: Self.barHeight + 2 * Self.tickInset)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -511,89 +503,35 @@ final class UsageBarView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let rect = bounds
-        guard rect.width > 0, rect.height > 0 else { return }
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let highContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        let rect = NSRect(x: 0, y: (bounds.height - Self.barHeight) / 2, width: bounds.width, height: Self.barHeight)
         let radius = rect.height / 2
-        let trackAlpha: CGFloat = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? 0.45 : 0.22
-        tint.withAlphaComponent(trackAlpha).setFill()
-        NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+
+        // A neutral, translucent track lets the menu material show through; a hairline gives it edge definition.
+        let track = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+        NSColor.labelColor.withAlphaComponent(highContrast ? 0.28 : 0.1).setFill()
+        track.fill()
+        NSColor.labelColor.withAlphaComponent(highContrast ? 0.4 : 0.08).setStroke()
+        let edge = NSBezierPath(roundedRect: rect.insetBy(dx: 0.25, dy: 0.25), xRadius: radius, yRadius: radius)
+        edge.lineWidth = 0.5
+        edge.stroke()
+
         if let fraction, fraction > 0 {
             var fill = rect
-            fill.size.width = rect.width * min(fraction, 1)
+            fill.size.width = max(rect.width * min(fraction, 1), rect.height)
             tint.setFill()
             NSBezierPath(roundedRect: fill, xRadius: radius, yRadius: radius).fill()
         }
+
         guard let pace else { return }
-        // A label-coloured tick with a background halo stays visible on both the track and the fill.
-        let x = ((rect.width - 2) * pace).rounded()
-        NSColor.windowBackgroundColor.setFill()
-        NSRect(x: x - 1, y: rect.minY, width: 4, height: rect.height).fill()
+        // Notch the bar with transparency (not a painted halo) so the tick reads on track, fill and material alike.
+        let x = ((rect.width - 2) * min(max(pace, 0), 1)).rounded()
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current?.compositingOperation = .clear
+        NSBezierPath(roundedRect: NSRect(x: x - 1.5, y: 0, width: 5, height: bounds.height), xRadius: 2.5, yRadius: 2.5).fill()
+        NSGraphicsContext.restoreGraphicsState()
         NSColor.labelColor.setFill()
-        NSRect(x: x, y: rect.minY, width: 2, height: rect.height).fill()
-    }
-}
-
-@MainActor
-final class ClaudeUsageMenuItemView: NSView {
-    private let titleField = NSTextField(labelWithString: "")
-    private let detailField = NSTextField(labelWithString: "")
-    private let bar = UsageBarView()
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 64))
-        translatesAutoresizingMaskIntoConstraints = false
-        setup()
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    func update(title: String, window: RateLimitWindowSnapshot?) {
-        titleField.stringValue = title
-        bar.setAccessibilityLabel(title)
-        if let window {
-            bar.fraction = CGFloat(window.usedPercent) / 100
-            bar.pace = window.weeklyPace().map { CGFloat($0) }
-            bar.setAccessibilityValue(window.usedPercent)
-            bar.setAccessibilityValueDescription(nil)
-            if let resetDate = window.resetsAt {
-                detailField.stringValue = "\(window.usedPercent)% used • \(UIFormatters.usageResetCountdownString(from: resetDate))"
-            } else {
-                detailField.stringValue = "\(window.usedPercent)% used • reset unavailable"
-            }
-        } else {
-            bar.fraction = nil
-            bar.pace = nil
-            bar.setAccessibilityValue(nil)
-            bar.setAccessibilityValueDescription("Unavailable")
-            detailField.stringValue = "Unavailable"
-        }
-    }
-
-    private func setup() {
-        titleField.font = .systemFont(ofSize: 12, weight: .semibold)
-        detailField.font = .systemFont(ofSize: 11)
-        detailField.textColor = .secondaryLabelColor
-        detailField.lineBreakMode = .byTruncatingTail
-        detailField.maximumNumberOfLines = 1
-        detailField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        bar.translatesAutoresizingMaskIntoConstraints = false
-
-        let stack = NSStackView(views: [titleField, bar, detailField])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 320),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-            bar.widthAnchor.constraint(equalToConstant: 290),
-            bar.heightAnchor.constraint(equalToConstant: 6)
-        ])
+        NSBezierPath(roundedRect: NSRect(x: x, y: 0, width: 2, height: bounds.height), xRadius: 1, yRadius: 1).fill()
     }
 }

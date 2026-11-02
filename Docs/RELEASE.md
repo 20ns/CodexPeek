@@ -1,5 +1,13 @@
 # Release Notes
 
+## 1.0.11
+
+- Redesign Usage History: translucent glass look that follows light and dark mode, Combined by default, stacked bars by service, full model names, month labels on long ranges, and no stuck loading states when one service has no data.
+- Polish the menu: percentage-first rows, a translucent bar track, and a clearer pace tick.
+- With Codex off, nothing Codex-related runs; its cached history still appears in Usage History.
+- Much faster, leaner scans: logs stream instead of loading whole, dates parse with a reused formatter, and the session index is a compact binary plist kept in memory. A first Codex scan of compressed logs drops from about 7 minutes to under 40 seconds, and Claude's 5-minute scan from about 280 MB to about 130 MB.
+- History content builds off the main thread, so switching views never stutters.
+
 ## 1.0.10
 
 - Add a pace mark to weekly bars showing where an even burn would be before the reset.

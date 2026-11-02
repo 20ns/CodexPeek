@@ -24,7 +24,7 @@ Selecting a managed account changes which profile CodexPeek reads. Choosing Open
 
 ## Refresh timing
 
-Use **Providers** in the menu to pick a primary service and choose which others to track. The primary service drives the menu-bar icon, leads the menu, and is always tracked. Tick or untick the other service under **Show in Menu**. Codex is the default primary and both start enabled, so existing setups look the same. Choices persist across app restarts. Unticking a service hides its menu section and pauses its requests, token scans, and file watching. Saved history and credentials stay on disk.
+Use **Providers** in the menu to pick a primary service and choose which others to track. The primary service drives the menu-bar icon, leads the menu, and is always tracked. Tick or untick the other service under **Show in Menu**. Codex is the default primary and both start enabled, so existing setups look the same. Choices persist across app restarts. Unticking a service hides its menu section and stops everything it runs: requests, token scans, the Codex helper, and file watching. Usage History keeps showing its last saved history, and credentials stay on disk.
 
 Weekly bars carry a pace mark: the share of the week already elapsed, which is where usage would sit if you spread the limit evenly until the reset. A fill short of the mark means you have room to spare; past it means you're on track to hit the limit early. The 5-hour window resets too often to need one.
 

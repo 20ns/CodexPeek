@@ -207,22 +207,13 @@ final class ClaudeCodeTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     }
 
     private func sessionUsage(from fileURL: URL, fallbackTimestamp: Date) throws -> SessionUsage? {
-        let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
         let decoder = JSONDecoder()
-        let usageMarker = Data("\"usage\"".utf8)
         var grouped: [String: PendingRequest] = [:]
         var order: [String] = []
-        var lineNumber = 0
-        var lineStart = data.startIndex
 
-        while lineStart < data.endIndex {
-            let lineEnd = data[lineStart...].firstIndex(of: 10) ?? data.endIndex
-            let line = data[lineStart..<lineEnd]
-            lineNumber += 1
-            lineStart = lineEnd < data.endIndex ? data.index(after: lineEnd) : data.endIndex
-            guard line.range(of: usageMarker) != nil,
-                  let entry = try? decoder.decode(ClaudeTranscriptLine.self, from: Data(line)),
-                  let pending = pendingRequest(from: entry, lineNumber: lineNumber) else { continue }
+        try LogLines.forEach(in: fileURL, matching: [Data("\"usage\"".utf8)]) { line, lineNumber in
+            guard let entry = try? decoder.decode(ClaudeTranscriptLine.self, from: line),
+                  let pending = pendingRequest(from: entry, lineNumber: lineNumber) else { return }
             if var existing = grouped[pending.key] {
                 existing.merge(pending)
                 grouped[pending.key] = existing
