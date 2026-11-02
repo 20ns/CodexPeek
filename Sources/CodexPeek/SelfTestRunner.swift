@@ -16,6 +16,7 @@ struct SelfTestRunner {
         try testTokenCounterResetAndFork()
         try testClaudeCodeUsage()
         try await testClaudeOAuthUsage()
+        try testClaudeCredentials()
         try testClaudeCodeTokenHistory()
         try testLegacyClaudeBackfill()
         try testUsageComparisons()
@@ -106,7 +107,12 @@ struct SelfTestRunner {
         try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-sol", usage: cachedUsage)?.total == Decimal(string: "0.1"), "Sol 6.1 cached rate mismatch")
         try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-sol", usage: usage, serviceTier: "fast", isLongContext: true)?.total == 38, "long-context Fast pricing mismatch")
         try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6-astra", usage: usage, serviceTier: "ultrafast")?.total == 360, "Astra Ultrafast pricing mismatch")
+        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-sol", usage: usage, serviceTier: "ultrafast")?.total == 72, "Sol 6.1 Ultrafast pricing mismatch")
+        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-sol", usage: usage, serviceTier: "future-tier") == nil, "unknown tiers must not use standard prices")
         try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6-sol", usage: usage, serviceTier: "ultrafast") == nil, "unsupported tier should remain unpriced")
+        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-terra", usage: usage)?.total == 6, "Terra 6.1 pricing mismatch")
+        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.3-codex", usage: usage, serviceTier: "fast")?.total == Decimal(string: "31.5"), "GPT-5.3 Codex Fast pricing mismatch")
+        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.4-nano", usage: usage, serviceTier: "fast") == nil, "Nano has no Fast price")
         try expect(UIFormatters.compactTokenString(2_106_400_000) == "2.1B", "billion token formatting mismatch")
     }
 
@@ -199,7 +205,7 @@ struct SelfTestRunner {
         let timestamp = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-60))
         let log = """
         {"timestamp":"\(timestamp)","type":"turn_context","payload":{"model":"gpt-6.1-sol"}}
-        {"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000,"cached_input_tokens":100000,"output_tokens":10000,"reasoning_output_tokens":0,"total_tokens":310000},"last_token_usage":{"input_tokens":300000,"cached_input_tokens":100000,"output_tokens":10000,"reasoning_output_tokens":0,"total_tokens":310000}}}}
+        {"timestamp":"\(timestamp)","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000,"cached_input_tokens":100000,"cache_write_input_tokens":100000,"output_tokens":10000,"reasoning_output_tokens":0,"total_tokens":310000},"last_token_usage":{"input_tokens":300000,"cached_input_tokens":100000,"cache_write_input_tokens":100000,"output_tokens":10000,"reasoning_output_tokens":0,"total_tokens":310000}}}}
         """
         let active = sessions.appendingPathComponent("rollout.jsonl")
         try Data(log.utf8).write(to: active)
@@ -207,15 +213,36 @@ struct SelfTestRunner {
         let source = CodexTokenUsageSource(sessionsRootURL: sessions, indexStore: index)
         let before = try source.usageReport()
         try expect(before.week.totalTokens == 310_000, "long request should be recorded once")
-        try expect(before.week.estimatedCostUSD == Decimal(string: "0.97"), "recording should preserve long-context prices")
+        try expect(before.week.estimatedCostUSD == Decimal(string: "1.07"), "cache writes must use their own long-context API rate")
         try expect(before.history?.buckets.first?.isLongContext == true, "long-context flag missing")
+        let parsed = try unwrap(before.history?.buckets.first?.usage, "parsed usage missing")
+        let decoded = try JSONDecoder().decode(TokenUsagePayload.self, from: JSONEncoder().encode(parsed))
+        try expect(decoded.cacheWriteInputTokens == 100_000, "cache writes must survive the session index")
+        let delta = parsed.delta(since: .zero)
+        try expect(delta?.cacheWriteInputTokens == 100_000, "cumulative-only rows must preserve cache writes")
+        try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-6.1-sol", usage: parsed, isLongContext: true) == Decimal(string: "0.28"), "cache savings must subtract the write premium")
         let daily = UsageHistoryAnalytics.dailyUsage(from: before.history!.buckets, days: 2)
         try expect(UsageHistoryAnalytics.modelTotals(from: daily).first?.cost == before.week.estimatedCostUSD, "history should use long-context prices")
         try FileManager.default.moveItem(at: active, to: archived.appendingPathComponent("rollout.jsonl"))
         let after = try source.usageReport()
         try expect(after.allTime == before.allTime, "archiving should preserve totals with a cached index")
+        if let zstd = CodexTokenUsageSource.zstdURL {
+            let plain = archived.appendingPathComponent("rollout.jsonl")
+            let compress = try Process.run(zstd, arguments: ["-q", plain.path])
+            compress.waitUntilExit()
+            let paired = try source.usageReport()
+            try expect(paired.allTime == before.allTime, "an archive beside its plain log must not double count")
+            try FileManager.default.removeItem(at: plain)
+            let compressed = try source.usageReport()
+            try expect(compressed.allTime == before.allTime, "compressed Codex logs must be counted")
+        }
         let invalid = TokenUsagePayload(inputTokens: 10, cachedInputTokens: 11, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 10)
         try expect(!invalid.isConsistent, "cached tokens cannot exceed input")
+        var invalidWrites = parsed
+        invalidWrites.cacheWriteInputTokens = Int.max
+        try expect(!invalidWrites.isConsistent, "cache reads and writes must fit within input without overflow")
+        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-sol", usage: invalidWrites) == nil, "inconsistent usage must not produce a cost")
+        try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-6.1-sol", usage: invalidWrites) == nil, "inconsistent usage must not produce savings")
         let overflowing = TokenUsagePayload(inputTokens: Int.max, cachedInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: Int.max)
         try expect(!overflowing.isConsistent, "inconsistent counters should not overflow validation")
     }
@@ -363,6 +390,50 @@ struct SelfTestRunner {
         }
     }
 
+    private func testClaudeCredentials() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let directory = home.appendingPathComponent(".claude", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let fresh = Data(#"{"claudeAiOauth":{"accessToken":"fresh","expiresAt":1800000060000,"scopes":["user:profile","user:inference"]}}"#.utf8)
+        let expired = Data(#"{"claudeAiOauth":{"accessToken":"expired","expiresAt":1800000000000}}"#.utf8)
+        let file = directory.appendingPathComponent(".credentials.json")
+        try expired.write(to: file)
+        let keychain = try ClaudeCredential.storedToken(directory: directory, homeDirectory: home, now: now, readKeychain: { fresh })
+        try expect(keychain == "fresh", "stale credential file must not mask the Keychain login")
+        try fresh.write(to: file)
+        let fallback = try ClaudeCredential.storedToken(directory: directory, homeDirectory: home, now: now, readKeychain: { expired })
+        try expect(fallback == "fresh", "expired Keychain must fall back to a valid file")
+        for (json, expected) in [
+            (#"{"claudeAiOauth":{"accessToken":"fixture","expiresAt":1799999999999}}"#, ClaudeUsageSourceError.expired),
+            (#"{"claudeAiOauth":{"accessToken":"fixture","expiresAt":true}}"#, .unreadable),
+            (#"{"claudeAiOauth":{"accessToken":"fixture","expiresAt":1e30}}"#, .unreadable),
+            (#"{"claudeAiOauth":{"accessToken":"fixture","scopes":["user:inference"]}}"#, .missingScope),
+            (#"{"claudeAiOauth":{"accessToken":"bad token"}}"#, .unreadable)
+        ] {
+            do {
+                _ = try ClaudeCredential.accessToken(in: Data(json.utf8), now: now)
+                throw CodexUsageError.invalidResponse("invalid credentials were accepted")
+            } catch let error as ClaudeUsageSourceError {
+                try expect(error == expected, "credential error mismatch")
+            }
+        }
+        let old = try ClaudeCredential.accessToken(in: Data(#"{"claudeAiOauth":{"accessToken":"legacy"}}"#.utf8), now: now)
+        try expect(old == "legacy", "older credentials without metadata should still work")
+        let custom = home.appendingPathComponent("work", isDirectory: true)
+        try FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
+        try fresh.write(to: custom.appendingPathComponent(".credentials.json"))
+        func forbiddenKeychain() throws -> Data { throw CodexUsageError.invalidResponse("custom profile read default credentials") }
+        let isolated = try ClaudeCredential.storedToken(directory: custom, homeDirectory: home, now: now, readKeychain: forbiddenKeychain)
+        try expect(isolated == "fresh", "custom profile must use its own credentials")
+        try FileManager.default.removeItem(at: custom.appendingPathComponent(".credentials.json"))
+        do {
+            _ = try ClaudeCredential.storedToken(directory: custom, homeDirectory: home, now: now, readKeychain: forbiddenKeychain)
+            throw CodexUsageError.invalidResponse("missing custom login used default credentials")
+        } catch ClaudeUsageSourceError.notSignedIn {}
+    }
+
     private func testClaudeOAuthUsage() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -462,7 +533,7 @@ struct SelfTestRunner {
             ("claude-fable-5-1", "60", "0.25"),
             ("claude-mythos-5-1", "60", "0.25"),
             ("claude-opus-5-5", "24", "0.2"),
-            ("claude-sonnet-5-5", "12", "0.2"),
+            ("claude-sonnet-5-5", "12", "0.1"),
             ("claude-fable-5", "60", "1"),
             ("claude-mythos-5", "60", "1"),
             ("claude-opus-5", "30", "0.5"),
@@ -476,6 +547,7 @@ struct SelfTestRunner {
             ("claude-sonnet-4-6", "18", "0.3"),
             ("claude-sonnet-4-5", "18", "0.3"),
             ("claude-sonnet-4", "18", "0.3"),
+            ("claude-haiku-5-5", "0.6", "0.01"),
             ("claude-haiku-4-5", "6", "0.1"),
             ("claude-haiku-3-5", "4.8", "0.08")
         ]
@@ -498,6 +570,9 @@ struct SelfTestRunner {
         try expect(!catalog.chargesLongContextPremium(for: "claude-sonnet-4", inputTokens: 200_000), "200k is still standard context")
         try expect(catalog.chargesLongContextPremium(for: "claude-sonnet-4-5", inputTokens: 200_001), "Sonnet 4.5 above 200k is long context")
         try expect(!catalog.chargesLongContextPremium(for: "claude-sonnet-4-6", inputTokens: 300_000), "Sonnet 4.6 has no long-context premium")
+        try expect(!catalog.chargesLongContextPremium(for: "claude-haiku-5-5", inputTokens: 100_000), "Haiku 5.5 up to 100k is standard")
+        try expect(catalog.chargesLongContextPremium(for: "claude-haiku-5-5", inputTokens: 100_001), "Haiku 5.5 above 100k is long context")
+        try expect(catalog.estimateCost(for: "claude-haiku-5-5", usage: paired, isLongContext: true)?.total == 3, "Haiku 5.5 long prompts cost 5x")
 
         let cacheUsage = TokenUsagePayload(
             inputTokens: 3_000_000,
@@ -514,6 +589,7 @@ struct SelfTestRunner {
         try expect(cacheCost.total == Decimal(string: "7.95"), "cache total mismatch")
         try expect(catalog.estimateCacheSavings(for: "claude-sonnet-4-6", usage: cacheUsage) == Decimal(string: "1.05"), "cache savings should subtract write premium")
         try expect(catalog.estimateCost(for: "claude-sonnet-4-6", usage: cacheUsage, inferenceGeo: "us")?.total == Decimal(string: "8.745"), "US cache pricing mismatch")
+        try expect(catalog.estimateCost(for: "claude-haiku-5-5", usage: cacheUsage, isLongContext: true)?.total == Decimal(string: "1.325"), "Haiku 5.5 long prompts scale cache rates 5x")
         let longUsage = TokenUsagePayload(inputTokens: 300_000, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 300_000)
         try expect(catalog.estimateCost(for: "claude-sonnet-4", usage: longUsage, isLongContext: true)?.total == Decimal(string: "1.8"), "old Sonnet long context should double input")
         try expect(catalog.estimateCost(for: "claude-sonnet-4-6", usage: longUsage, isLongContext: true)?.total == Decimal(string: "0.9"), "newer models ignore the long-context flag")

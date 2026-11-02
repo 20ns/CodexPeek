@@ -54,6 +54,7 @@ final class ClaudeCodeTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         var historyRequests: [UsageRequestRecord] = []
 
         for file in files {
+            try Task.checkCancellation()
             let session: SessionUsage?
             if let cached = index.sessions[file.path], cached.matches(file) {
                 session = cached.session

@@ -1,5 +1,13 @@
 # Release Notes
 
+## 1.0.9
+
+- Choose a primary service (Codex or Claude Code) for the menu-bar icon and top of the menu, and tick or untick the other.
+- Count Codex's compressed `.jsonl.zst` session logs in token history when the `zstd` CLI is installed.
+- Fix Claude Sonnet 5.5 cache-read pricing, add Claude Haiku 5.5 with its 100K-prompt tier, add GPT-6.1 Terra, and correct Fast pricing for GPT-5.3 Codex, GPT-5.4 Nano and GPT-5.6 Cyber.
+- Stop timer tolerance from skipping a Claude quota refresh, which could leave readings up to 10 minutes old.
+- Prefer valid Claude Code credentials and report expired or under-scoped logins.
+
 ## 1.0.7
 
 - Refresh usage on one five-minute timer. Manual refresh pulls immediately and restarts the wait; opening menus or history, waking and auth-file writes do not pull usage.

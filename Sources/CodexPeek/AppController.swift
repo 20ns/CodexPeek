@@ -7,9 +7,16 @@ final class AppController: NSObject, NSMenuDelegate {
     private static let refreshTolerance: TimeInterval = 30
 
     private let accountStore: AccountProfileStore
+    private let defaults: UserDefaults
+    private enum Provider: String { case codex, claude }
+    private var primaryProvider: Provider { Provider(rawValue: defaults.string(forKey: "primaryProvider") ?? "") ?? .codex }
+    // The primary provider is always tracked; the stored flag remembers the choice for when it is secondary.
+    private var codexEnabled: Bool { primaryProvider == .codex || defaults.bool(forKey: "codexEnabled") }
+    private var claudeEnabled: Bool { primaryProvider == .claude || defaults.bool(forKey: "claudeEnabled") }
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private let accountsMenu = NSMenu(title: "Accounts")
+    private let providersMenu = NSMenu(title: "Providers")
     private let iconRenderer = StatusIconRenderer()
     private let launchAtLoginController = LaunchAtLoginController()
     private let codexAppOpener = CodexAppOpener()
@@ -48,6 +55,14 @@ final class AppController: NSObject, NSMenuDelegate {
     private let logoutItem = NSMenuItem(title: "Log Out", action: #selector(logOut), keyEquivalent: "")
     private let openCodexItem = NSMenuItem(title: "Open Codex", action: #selector(openCodex), keyEquivalent: "")
     private let historyItem = NSMenuItem(title: "Usage History…", action: #selector(openUsageHistory), keyEquivalent: "")
+    private let providersItem = NSMenuItem(title: "Providers", action: nil, keyEquivalent: "")
+    private let codexPrimaryItem = NSMenuItem(title: "Codex", action: #selector(selectPrimary), keyEquivalent: "")
+    private let claudePrimaryItem = NSMenuItem(title: "Claude Code", action: #selector(selectPrimary), keyEquivalent: "")
+    private let codexToggleItem = NSMenuItem(title: "Codex", action: #selector(toggleCodex), keyEquivalent: "")
+    private let claudeToggleItem = NSMenuItem(title: "Claude Code", action: #selector(toggleClaude), keyEquivalent: "")
+    private let refreshItem = NSMenuItem(title: "Refresh Usage", action: #selector(refreshNow), keyEquivalent: "")
+    private let codexHeaderSeparator = NSMenuItem.separator()
+    private let sectionSeparator = NSMenuItem.separator()
     private let removeAccountItem = NSMenuItem(title: "Remove Current Account…", action: #selector(removeCurrentAccount), keyEquivalent: "")
     private let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
 
@@ -91,8 +106,10 @@ final class AppController: NSObject, NSMenuDelegate {
     private var pendingCreatedProfileIDs = Set<String>()
     private var loginMonitorTask: Task<Void, Never>?
 
-    init(accountStore: AccountProfileStore) {
+    init(accountStore: AccountProfileStore, defaults: UserDefaults = .standard) {
         self.accountStore = accountStore
+        self.defaults = defaults
+        defaults.register(defaults: ["codexEnabled": true, "claudeEnabled": true])
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
     }
@@ -106,7 +123,7 @@ final class AppController: NSObject, NSMenuDelegate {
         scheduleRefreshTimer()
 
         do {
-            try syncAccountStateFromDisk()
+            if codexEnabled { try syncAccountStateFromDisk() }
         } catch {
             refreshState = .failed("Failed to load account profiles")
         }
@@ -133,7 +150,7 @@ final class AppController: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         do {
-            try syncAccountStateFromDisk()
+            if codexEnabled { try syncAccountStateFromDisk() }
         } catch {
             refreshState = .failed("Failed to load account profiles")
         }
@@ -147,6 +164,53 @@ final class AppController: NSObject, NSMenuDelegate {
         refreshClaudeTokenReportIfNeeded(force: true)
         refreshClaudeUsage()
         refreshClaudeAccountUsage(force: true)
+    }
+
+    @objc private func selectPrimary(_ sender: NSMenuItem) {
+        updateProviders { defaults.set(sender === claudePrimaryItem ? Provider.claude.rawValue : Provider.codex.rawValue, forKey: "primaryProvider") }
+    }
+
+    @objc private func toggleCodex() {
+        updateProviders { defaults.set(!defaults.bool(forKey: "codexEnabled"), forKey: "codexEnabled") }
+    }
+
+    @objc private func toggleClaude() {
+        updateProviders { defaults.set(!defaults.bool(forKey: "claudeEnabled"), forKey: "claudeEnabled") }
+    }
+
+    private func updateProviders(_ change: () -> Void) {
+        let wasCodex = codexEnabled, wasClaude = claudeEnabled
+        change()
+        if codexEnabled != wasCodex {
+            if codexEnabled {
+                triggerRefresh(reason: "provider-enabled", force: true)
+                if let activeProfile { installAuthFileWatcher(for: activeProfile) }
+                refreshTokenReportIfNeeded(force: true)
+            } else {
+                authFileWatcher.stop()
+                loginMonitorTask?.cancel()
+                refreshTask?.cancel()
+                tokenReportTask?.cancel()
+                pendingRefreshReason = nil
+                pendingTokenReportRefresh = false
+                refreshState = .idle
+            }
+        }
+        if claudeEnabled != wasClaude {
+            if claudeEnabled {
+                watchClaudeUsage()
+                refreshClaudeUsage()
+                refreshClaudeAccountUsage()
+                refreshClaudeTokenReportIfNeeded(force: true)
+            } else {
+                claudeUsageWatcher.stop()
+                claudeUsageTask?.cancel()
+                claudeTokenTask?.cancel()
+                pendingClaudeTokenRefresh = false
+            }
+        }
+        layoutMenu()
+        render()
     }
 
     @objc private func enableClaudeLocalUsage() {
@@ -169,8 +233,8 @@ final class AppController: NSObject, NSMenuDelegate {
             )
         }
         usageHistoryWindowController?.show(
-            report: tokenReport,
-            claudeReport: claudeTokenReport,
+            report: codexEnabled ? tokenReport : nil,
+            claudeReport: claudeEnabled ? claudeTokenReport : nil,
             planHistory: planHistory,
             snapshot: snapshot,
             accountPlan: activeAccountSnapshot?.planType ?? .unknown
@@ -383,7 +447,6 @@ final class AppController: NSObject, NSMenuDelegate {
 
     private func configureStatusItem() {
         statusItem.button?.imagePosition = .imageOnly
-        statusItem.button?.toolTip = "Codex usage"
         statusItem.menu = menu
     }
 
@@ -402,11 +465,22 @@ final class AppController: NSObject, NSMenuDelegate {
         claudeTokenCostItem.view = claudeTokenCostView
         claudeStatusItem.view = claudeStatusView
         accountsItem.submenu = accountsMenu
+        providersItem.submenu = providersMenu
+        providersMenu.autoenablesItems = false
+        for item in [codexPrimaryItem, claudePrimaryItem, codexToggleItem, claudeToggleItem] {
+            item.target = self
+        }
+        providersMenu.items = [
+            .sectionHeader(title: "Menu Bar Icon"), codexPrimaryItem, claudePrimaryItem,
+            .separator(),
+            .sectionHeader(title: "Show in Menu"), codexToggleItem, claudeToggleItem
+        ]
 
         launchAtLoginItem.target = self
         logoutItem.target = self
         openCodexItem.target = self
         historyItem.target = self
+        refreshItem.target = self
         removeAccountItem.target = self
         quitItem.target = self
         enableClaudeItem.target = self
@@ -418,29 +492,19 @@ final class AppController: NSObject, NSMenuDelegate {
             self?.copyDebugInfo()
         }
 
-        menu.addItem(headerItem)
-        menu.addItem(.separator())
-        menu.addItem(primaryUsageItem)
-        menu.addItem(secondaryUsageItem)
-        menu.addItem(sparkUsageItem)
-        menu.addItem(tokenCostItem)
-        menu.addItem(statusItemView)
-        menu.addItem(.separator())
-        menu.addItem(claudeSectionItem)
-        menu.addItem(claudeFiveHourItem)
-        menu.addItem(claudeWeeklyItem)
-        menu.addItem(claudeTokenCostItem)
-        menu.addItem(claudeStatusItem)
-        menu.addItem(enableClaudeItem)
-        menu.addItem(.separator())
-        menu.addItem(historyItem)
-        menu.addItem(accountsItem)
-        menu.addItem(.separator())
-        menu.addItem(launchAtLoginItem)
-        menu.addItem(logoutItem)
-        menu.addItem(openCodexItem)
-        menu.addItem(.separator())
-        menu.addItem(quitItem)
+        layoutMenu()
+    }
+
+    /// The primary provider's section leads the menu.
+    private func layoutMenu() {
+        let codex = [headerItem, codexHeaderSeparator, primaryUsageItem, secondaryUsageItem, sparkUsageItem, tokenCostItem, statusItemView]
+        let claude = [claudeSectionItem, claudeFiveHourItem, claudeWeeklyItem, claudeTokenCostItem, claudeStatusItem, enableClaudeItem]
+        let sections = primaryProvider == .codex ? codex + [sectionSeparator] + claude : claude + [sectionSeparator] + codex
+        menu.items = sections + [
+            .separator(), refreshItem, historyItem, providersItem, accountsItem,
+            .separator(), launchAtLoginItem, logoutItem, openCodexItem,
+            .separator(), quitItem
+        ]
     }
 
     private func installWakeObserver() {
@@ -456,9 +520,10 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func installAuthFileWatcher(for profile: AccountProfile) {
+        guard codexEnabled else { return }
         authFileWatcher.start(watching: profile.authURL) { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.codexEnabled else { return }
                 let previousAccount = self.activeAccountSnapshot
                 let previousProfileID = self.activeProfile?.id
                 do {
@@ -489,6 +554,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func triggerRefresh(reason: String, force: Bool = false) {
+        guard codexEnabled else { return }
         do {
             try syncAccountStateFromDisk()
         } catch {
@@ -543,7 +609,7 @@ final class AppController: NSObject, NSMenuDelegate {
 
             do {
                 let snapshot = try await repository.refresh()
-                guard self.activeProfile?.id == profileID else {
+                guard !Task.isCancelled, self.codexEnabled, self.activeProfile?.id == profileID else {
                     return
                 }
                 if self.shouldAttemptDuplicateProfileRecovery(for: activeProfile, snapshot: snapshot),
@@ -560,7 +626,7 @@ final class AppController: NSObject, NSMenuDelegate {
                 self.refreshState = .idle
                 try self.syncAccountStateFromDisk()
             } catch {
-                guard self.activeProfile?.id == profileID else {
+                guard !Task.isCancelled, self.codexEnabled, self.activeProfile?.id == profileID else {
                     return
                 }
                 if let candidate = await self.recoverDuplicateProfile(from: activeProfile) {
@@ -572,7 +638,6 @@ final class AppController: NSObject, NSMenuDelegate {
                 self.refreshState = .failed(error.localizedDescription)
             }
 
-            self.statusItem.button?.toolTip = "Codex usage (\(reason) refresh)"
         }
     }
 
@@ -599,6 +664,7 @@ final class AppController: NSObject, NSMenuDelegate {
         )
 
         for candidate in candidates {
+            guard !Task.isCancelled, codexEnabled else { return nil }
             let repository = makeRepository(for: candidate)
             guard let snapshot = try? await repository.refresh(),
                   !snapshot.isStale,
@@ -606,6 +672,7 @@ final class AppController: NSObject, NSMenuDelegate {
                 continue
             }
 
+            guard !Task.isCancelled, codexEnabled else { return nil }
             guard let updatedState = try? accountStore.setActiveProfileID(candidate.id) else {
                 return candidate
             }
@@ -618,15 +685,24 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func render() {
-        let primaryPercent = snapshot?.primary?.usedPercent
-        let secondaryPercent = snapshot?.secondary?.usedPercent
         let isWeeklyExhausted = snapshot?.isWeeklyExhausted == true
-        statusItem.button?.image = iconRenderer.render(
-            primaryPercent: primaryPercent,
-            secondaryPercent: secondaryPercent,
-            refreshState: refreshState,
-            isWeeklyExhausted: isWeeklyExhausted
-        )
+        if primaryProvider == .codex {
+            statusItem.button?.image = iconRenderer.render(
+                primaryPercent: snapshot?.primary?.usedPercent,
+                secondaryPercent: snapshot?.secondary?.usedPercent,
+                refreshState: refreshState,
+                isWeeklyExhausted: isWeeklyExhausted
+            )
+            statusItem.button?.toolTip = "Codex usage"
+        } else {
+            statusItem.button?.image = iconRenderer.render(
+                primaryPercent: claudeSnapshot?.fiveHour?.usedPercent,
+                secondaryPercent: claudeSnapshot?.sevenDay?.usedPercent,
+                refreshState: claudeUsageTask != nil ? .refreshing : .idle,
+                isWeeklyExhausted: claudeSnapshot?.sevenDay?.isExhausted == true
+            )
+            statusItem.button?.toolTip = "Claude Code usage"
+        }
 
         headerView.update(snapshot: snapshot, refreshState: refreshState)
 
@@ -646,7 +722,6 @@ final class AppController: NSObject, NSMenuDelegate {
                 overrideDetail: overrideDetail
             )
             secondaryUsageView.update(title: weeklyTitle, window: weeklyWindow)
-            secondaryUsageItem.isHidden = false
         } else {
             let singleWindow = weeklyWindow ?? sessionWindow ?? snapshot?.primary
             let title = UIFormatters.rateLimitWindowTitle(for: singleWindow, fallback: singleWindow?.isWeekly == true ? "Weekly window" : "Usage")
@@ -657,14 +732,10 @@ final class AppController: NSObject, NSMenuDelegate {
                 isDimmed: false,
                 overrideDetail: nil
             )
-            secondaryUsageItem.isHidden = true
         }
 
         sparkUsageView.update(snapshot: snapshot?.spark)
-        sparkUsageItem.isHidden = snapshot?.spark == nil
         tokenCostView.update(report: tokenReport, isRefreshing: tokenReportTask != nil)
-        claudeFiveHourItem.isHidden = claudeSnapshot?.fiveHour == nil
-        claudeWeeklyItem.isHidden = claudeSnapshot?.sevenDay == nil
         if claudeSnapshot != nil {
             claudeFiveHourView.update(
                 title: UIFormatters.rateLimitWindowTitle(for: claudeSnapshot?.fiveHour, fallback: "5-hour window"),
@@ -682,11 +753,29 @@ final class AppController: NSObject, NSMenuDelegate {
             sourceName: "Claude Code",
             failed: claudeTokenFailed
         )
-        enableClaudeItem.isHidden = claudeBridgeEnabled && claudeUsageError == nil
+        for item in [headerItem, primaryUsageItem, tokenCostItem, statusItemView, accountsItem, logoutItem, openCodexItem, removeAccountItem] {
+            item.isHidden = !codexEnabled
+        }
+        secondaryUsageItem.isHidden = !codexEnabled || !hasBothWindows
+        sparkUsageItem.isHidden = !codexEnabled || snapshot?.spark == nil
+        for item in [claudeSectionItem, claudeTokenCostItem, claudeStatusItem] {
+            item.isHidden = !claudeEnabled
+        }
+        claudeFiveHourItem.isHidden = !claudeEnabled || claudeSnapshot?.fiveHour == nil
+        claudeWeeklyItem.isHidden = !claudeEnabled || claudeSnapshot?.sevenDay == nil
+        enableClaudeItem.isHidden = !claudeEnabled || (claudeBridgeEnabled && claudeUsageError == nil)
+        codexHeaderSeparator.isHidden = !codexEnabled
+        sectionSeparator.isHidden = !codexEnabled || !claudeEnabled
+        codexPrimaryItem.state = primaryProvider == .codex ? .on : .off
+        claudePrimaryItem.state = primaryProvider == .claude ? .on : .off
+        codexToggleItem.state = codexEnabled ? .on : .off
+        claudeToggleItem.state = claudeEnabled ? .on : .off
+        codexToggleItem.isEnabled = primaryProvider != .codex
+        claudeToggleItem.isEnabled = primaryProvider != .claude
         statusView.update(snapshot: snapshot, refreshState: refreshState, accountStatus: accountStatusMessage())
         usageHistoryWindowController?.update(
-            report: tokenReport,
-            claudeReport: claudeTokenReport,
+            report: codexEnabled ? tokenReport : nil,
+            claudeReport: claudeEnabled ? claudeTokenReport : nil,
             planHistory: planHistory,
             snapshot: snapshot,
             accountPlan: activeAccountSnapshot?.planType ?? .unknown
@@ -963,7 +1052,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func refreshTokenReportIfNeeded(force: Bool) {
-        guard let tokenUsageSource,
+        guard codexEnabled, let tokenUsageSource,
               let tokenReportStore,
               let activeProfile else {
             return
@@ -988,13 +1077,19 @@ final class AppController: NSObject, NSMenuDelegate {
             if Task.isCancelled {
                 report = nil
             } else {
-                report = try? await Task.detached(priority: .utility) {
+                // Sources check cancellation between files, so unticking a provider stops its scan.
+                let scan = Task.detached(priority: .utility) {
+                    try Task.checkCancellation()
                     let report = try tokenUsageSource.usageReport()
+                    try Task.checkCancellation()
                     try tokenReportStore.save(report)
                     return report
-                }.value
+                }
+                report = try? await withTaskCancellationHandler {
+                    try await scan.value
+                } onCancel: { scan.cancel() }
             }
-            self?.finishTokenReportRefresh(profileID: profileID, generation: generation, report: report)
+            self?.finishTokenReportRefresh(profileID: profileID, generation: generation, report: Task.isCancelled ? nil : report)
         }
         render()
     }
@@ -1004,7 +1099,7 @@ final class AppController: NSObject, NSMenuDelegate {
             return
         }
         tokenReportTask = nil
-        if activeProfile?.id == profileID, let report {
+        if codexEnabled, activeProfile?.id == profileID, let report {
             tokenReport = report
         }
         render()
@@ -1017,6 +1112,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func refreshClaudeTokenReportIfNeeded(force: Bool) {
+        guard claudeEnabled else { return }
         guard claudeTokenTask == nil else {
             pendingClaudeTokenRefresh = pendingClaudeTokenRefresh || force
             return
@@ -1027,23 +1123,32 @@ final class AppController: NSObject, NSMenuDelegate {
         let source = claudeTokenSource
         let store = claudeTokenStore
         claudeTokenTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.claudeTokenTask = nil
+                self.render()
+                if self.pendingClaudeTokenRefresh {
+                    self.pendingClaudeTokenRefresh = false
+                    self.refreshClaudeTokenReportIfNeeded(force: true)
+                }
+            }
             do {
-                let report = try await Task.detached(priority: .utility) {
+                let scan = Task.detached(priority: .utility) {
+                    try Task.checkCancellation()
                     let report = try source.usageReport()
+                    try Task.checkCancellation()
                     try store.save(report)
                     return report
-                }.value
-                self?.claudeTokenReport = report
-                self?.claudeTokenFailed = false
+                }
+                let report = try await withTaskCancellationHandler {
+                    try await scan.value
+                } onCancel: { scan.cancel() }
+                guard !Task.isCancelled, self.claudeEnabled else { return }
+                self.claudeTokenReport = report
+                self.claudeTokenFailed = false
             } catch {
-                self?.claudeTokenFailed = true
-            }
-            guard let self else { return }
-            self.claudeTokenTask = nil
-            self.render()
-            if self.pendingClaudeTokenRefresh {
-                self.pendingClaudeTokenRefresh = false
-                self.refreshClaudeTokenReportIfNeeded(force: true)
+                guard !Task.isCancelled, self.claudeEnabled else { return }
+                self.claudeTokenFailed = true
             }
         }
         render()
@@ -1078,6 +1183,7 @@ final class AppController: NSObject, NSMenuDelegate {
                 }
 
                 try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, self.codexEnabled else { return }
 
                 do {
                     try self.syncAccountStateFromDisk()
@@ -1211,12 +1317,14 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func watchClaudeUsage() {
+        guard claudeEnabled else { return }
         claudeUsageWatcher.start(watching: ClaudeCodeStatusLine.cacheURL) { [weak self] in
             Task { @MainActor [weak self] in self?.refreshClaudeUsage() }
         }
     }
 
     private func refreshClaudeUsage() {
+        guard claudeEnabled else { return }
         do {
             let cached = try ClaudeCodeStatusLine.load()
             if let cached, cached.updatedAt != claudeSnapshot?.updatedAt, !cached.isStale {
@@ -1236,16 +1344,27 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func refreshClaudeAccountUsage(force: Bool = false) {
-        guard claudeUsageTask == nil, force || claudeSnapshot?.isStale != false else { return }
+        let due = claudeSnapshot.map {
+            $0.isStale || Date().timeIntervalSince($0.updatedAt) >= Self.refreshInterval - Self.refreshTolerance
+        } ?? true
+        guard claudeEnabled, claudeUsageTask == nil, force || due else { return }
+        // Off-phase fetches (manual, re-enabled) restart the shared wait so the next tick finds the reading due.
+        refreshTimer?.fireDate = Date().addingTimeInterval(Self.refreshInterval)
         claudeUsageTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.claudeUsageTask = nil; self.render() }
+            defer {
+                self.claudeUsageTask = nil
+                self.render()
+                if Task.isCancelled, self.claudeEnabled { self.refreshClaudeAccountUsage(force: true) }
+            }
             do {
                 if let fresh = try await self.claudeUsageSource.refresh(force: force) {
+                    guard !Task.isCancelled, self.claudeEnabled else { return }
                     self.claudeSnapshot = fresh
                     self.claudeUsageError = nil
                 }
             } catch {
+                guard !Task.isCancelled, self.claudeEnabled else { return }
                 self.refreshClaudeUsage()
                 self.claudeSnapshot?.isStale = true
                 self.claudeUsageError = error.localizedDescription

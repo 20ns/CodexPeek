@@ -2,11 +2,13 @@ import Darwin
 import Foundation
 
 enum ClaudeUsageSourceError: LocalizedError, Equatable {
-    case notSignedIn, unreadable, rejected, rateLimited, unavailable, timedOut
+    case notSignedIn, expired, missingScope, unreadable, rejected, rateLimited, unavailable, timedOut
 
     var errorDescription: String? {
         switch self {
         case .notSignedIn: "Claude is not signed in."
+        case .expired: "Claude sign-in expired. Open Claude Code to refresh your login."
+        case .missingScope: "Claude token cannot read usage. Sign in through Claude Code and remove any inference-only OAuth token override."
         case .unreadable: "Claude credentials could not be read."
         case .rejected: "Claude usage data was rejected."
         case .rateLimited: "Claude usage is rate limited."
@@ -17,7 +19,8 @@ enum ClaudeUsageSourceError: LocalizedError, Equatable {
 }
 
 actor ClaudeCodeUsageSource {
-    private static let gap: TimeInterval = 5 * 60
+    // Just under the app's five-minute timer, so timer tolerance cannot push a due request a whole cycle.
+    private static let gap: TimeInterval = 4.5 * 60
     private let cacheURL: URL
     private let now: @Sendable () -> Date
     private let readToken: @Sendable () async throws -> String
@@ -114,34 +117,63 @@ private enum ClaudeUsageHTTP {
     }
 }
 
-private enum ClaudeCredential {
+enum ClaudeCredential {
     static func token() async throws -> String {
         let environment = ProcessInfo.processInfo.environment["CLAUDE_CODE_OAUTH_TOKEN"]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !environment.isEmpty { return environment }
-        return try await Task.detached(priority: .userInitiated) { try readOffMainActor() }.value
+        return try await Task.detached(priority: .userInitiated) { try storedToken() }.value
     }
 
-    private static func readOffMainActor() throws -> String {
-        let url = ClaudeCodeTokenUsageSource.defaultProjectsRoot()
-            .deletingLastPathComponent()
-            .appendingPathComponent(".credentials.json")
-        if let token = try fileToken(url) { return token }
-        guard let token = accessToken(in: try keychainData()) else { throw ClaudeUsageSourceError.notSignedIn }
-        return token
+    static func storedToken(
+        directory: URL = ClaudeCodeTokenUsageSource.defaultProjectsRoot().deletingLastPathComponent(),
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        now: Date = Date(),
+        readKeychain: () throws -> Data = keychainData
+    ) throws -> String {
+        let defaultDirectory = homeDirectory.appendingPathComponent(".claude")
+        var keychainError: Error?
+        // The global Keychain item belongs to the default profile, never a custom config directory.
+        if directory.standardizedFileURL.path == defaultDirectory.standardizedFileURL.path {
+            do {
+                if let token = try accessToken(in: readKeychain(), now: now) { return token }
+            } catch { keychainError = error }
+        }
+        let url = directory.appendingPathComponent(".credentials.json")
+        if let token = try fileToken(url, now: now) { return token }
+        if let keychainError { throw keychainError }
+        throw ClaudeUsageSourceError.notSignedIn
     }
 
-    private static func fileToken(_ url: URL) throws -> String? {
+    private static func fileToken(_ url: URL, now: Date) throws -> String? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        do { return accessToken(in: try Data(contentsOf: url)) } catch { throw ClaudeUsageSourceError.unreadable }
+        let data: Data
+        do { data = try Data(contentsOf: url) } catch { throw ClaudeUsageSourceError.unreadable }
+        return try accessToken(in: data, now: now)
     }
 
-    private static func accessToken(in data: Data) -> String? {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = root["claudeAiOauth"] as? [String: Any],
-              let token = oauth["accessToken"] as? String else { return nil }
+    static func accessToken(in data: Data, now: Date = Date()) throws -> String? {
+        if data.isEmpty { return nil }
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ClaudeUsageSourceError.unreadable
+        }
+        guard let raw = root["claudeAiOauth"] else { return nil }
+        guard let oauth = raw as? [String: Any] else { throw ClaudeUsageSourceError.unreadable }
+        guard let token = oauth["accessToken"] as? String else { throw ClaudeUsageSourceError.unreadable }
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        guard !trimmed.isEmpty, !trimmed.contains(where: \.isWhitespace) else { throw ClaudeUsageSourceError.unreadable }
+        if let value = oauth["expiresAt"] {
+            guard let milliseconds = value as? NSNumber, CFGetTypeID(milliseconds) != CFBooleanGetTypeID(),
+                  milliseconds.doubleValue.isFinite, (0...253_402_300_799_000).contains(milliseconds.doubleValue) else {
+                throw ClaudeUsageSourceError.unreadable
+            }
+            guard milliseconds.doubleValue / 1000 > now.timeIntervalSince1970 else { throw ClaudeUsageSourceError.expired }
+        }
+        if let value = oauth["scopes"] {
+            guard let scopes = value as? [String] else { throw ClaudeUsageSourceError.unreadable }
+            guard scopes.contains("user:profile") else { throw ClaudeUsageSourceError.missingScope }
+        }
+        return trimmed
     }
 
     /// Password JSON stays in memory for parsing. Never log or include it in an error.

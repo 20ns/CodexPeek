@@ -31,6 +31,7 @@ The menu is native AppKit. The history window uses Swift Charts. There are no pa
 
 - Codex 5-hour and weekly usage, reset countdowns, and Spark limits when available.
 - Claude Code 5-hour and weekly usage in a separate section.
+- A primary service of your choice (Codex or Claude Code) in the menu-bar icon, with the other one optional.
 - Daily and hourly token history by model, including retained archived Codex sessions and Claude subagent logs.
 - Codex, Claude Code, or combined history, with API-equivalent estimates for the last 7 days, 30 days, and all retained logs.
 - The active Codex account and plan, with account switching from the menu.

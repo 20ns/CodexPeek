@@ -56,6 +56,7 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         var allBuckets: [TokenUsageBucket] = []
 
         for file in files {
+            try Task.checkCancellation()
             let session: SessionUsage?
             if let cached = index.sessions[file.path], cached.matches(file) {
                 session = cached.session
@@ -98,7 +99,8 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
                 includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
                 options: [.skipsHiddenFiles]
             ) else { continue }
-            for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" {
+            for case let fileURL as URL in enumerator
+            where fileURL.pathExtension == "jsonl" || (Self.zstdURL != nil && fileURL.path.hasSuffix(".jsonl.zst")) {
                 let values = try fileURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
                 files.append(SessionLogFile(
                     url: fileURL,
@@ -109,7 +111,30 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
             }
         }
 
-        return files
+        // Skip an archive whose plain log still exists, e.g. while Codex is compressing it.
+        let plain = Set(files.filter { $0.url.pathExtension == "jsonl" }.map(\.path))
+        return files.filter { $0.url.pathExtension != "zst" || !plain.contains(String($0.path.dropLast(4))) }
+    }
+
+    // ponytail: macOS ships no zstd decoder, so Codex's compressed `.jsonl.zst` logs need the zstd CLI
+    // and are left out without it. Vendoring libzstd would drop that requirement.
+    static let zstdURL = ["/opt/homebrew/bin/zstd", "/usr/local/bin/zstd", "/opt/local/bin/zstd"]
+        .first(where: FileManager.default.isExecutableFile(atPath:))
+        .map { URL(fileURLWithPath: $0) }
+
+    private static func logData(at url: URL) throws -> Data? {
+        guard url.pathExtension == "zst" else { return try Data(contentsOf: url, options: .mappedIfSafe) }
+        guard let zstdURL else { return nil }
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = zstdURL
+        process.arguments = ["-dcq", "--", url.path]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return nil }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return process.terminationStatus == 0 ? data : nil
     }
 
     private func add(
@@ -150,7 +175,7 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     }
 
     private func sessionUsage(from fileURL: URL, fallbackTimestamp: Date) throws -> SessionUsage? {
-        let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
+        guard let data = try Self.logData(at: fileURL) else { return nil }
         let decoder = JSONDecoder()
         var buckets: [TokenUsageBucket] = []
         var previousUsage = TokenUsagePayload.zero
@@ -323,6 +348,8 @@ struct TokenPricingCatalog: Sendable {
         var fastModeUnpriced: Bool = false
         var usDataResidency: Bool = false
         var longContextThreshold: Int? = nil
+        var longInputScale: Decimal = 2
+        var longOutputScale: Decimal = Decimal(string: "1.5")!
     }
 
     struct Cost: Sendable {
@@ -336,14 +363,15 @@ struct TokenPricingCatalog: Sendable {
     }
 
     static let standard = TokenPricingCatalog(prices: [
-        "gpt-6.1-sol": Price(inputPerMillion: 2, cachedInputPerMillion: 0.1, outputPerMillion: 10, displayName: "GPT-6.1 Sol", priorityMultiplier: 2, fastCreditMultiplier: 2.5, longContext: true),
+        "gpt-6.1-sol": Price(inputPerMillion: 2, cachedInputPerMillion: 0.1, outputPerMillion: 10, displayName: "GPT-6.1 Sol", priorityMultiplier: 2, fastCreditMultiplier: 2.5, longContext: true, ultrafastMultiplier: 6),
+        "gpt-6.1-terra": Price(inputPerMillion: 1, cachedInputPerMillion: 0.05, outputPerMillion: 5, displayName: "GPT-6.1 Terra", priorityMultiplier: 2, fastCreditMultiplier: 2.5, longContext: true),
         "gpt-6-sol": Price(inputPerMillion: 2, cachedInputPerMillion: 0.2, outputPerMillion: 10, displayName: "GPT-6 Sol", priorityMultiplier: 2, fastCreditMultiplier: 2.5, longContext: true),
         "gpt-6-luna": Price(inputPerMillion: 0.1, cachedInputPerMillion: 0.01, outputPerMillion: 0.5, displayName: "GPT-6 Luna", priorityMultiplier: 2, fastCreditMultiplier: 2.5, longContext: true),
         "gpt-6-astra": Price(inputPerMillion: 10, cachedInputPerMillion: 1, outputPerMillion: 50, displayName: "GPT-6 Astra", priorityMultiplier: 2, fastCreditMultiplier: 2.5, longContext: true, ultrafastMultiplier: 6),
         "gpt-5.6-sol": Price(inputPerMillion: 4, cachedInputPerMillion: 0.4, outputPerMillion: 20, displayName: "GPT-5.6 Sol", priorityMultiplier: 2, fastCreditMultiplier: 2.5, longContext: true),
         "gpt-5.6-terra": Price(inputPerMillion: 2, cachedInputPerMillion: 0.2, outputPerMillion: 12, displayName: "GPT-5.6 Terra", priorityMultiplier: 2, fastCreditMultiplier: 2.5, longContext: true),
         "gpt-5.6-luna": Price(inputPerMillion: 0.2, cachedInputPerMillion: 0.02, outputPerMillion: 1.2, displayName: "GPT-5.6 Luna", priorityMultiplier: 2, fastCreditMultiplier: 2.5, longContext: true),
-        "gpt-5.6-cyber": Price(inputPerMillion: 12.5, cachedInputPerMillion: 1.25, outputPerMillion: 75, displayName: "GPT-5.6 Cyber"),
+        "gpt-5.6-cyber": Price(inputPerMillion: 12.5, cachedInputPerMillion: 1.25, outputPerMillion: 75, displayName: "GPT-5.6 Cyber", fastModeUnpriced: true),
         "gpt-daybreak-blue-latest": Price(inputPerMillion: 4, cachedInputPerMillion: 0.4, outputPerMillion: 20, displayName: "Daybreak Blue", priorityMultiplier: 2, fastCreditMultiplier: 2.5, longContext: true),
         "gpt-daybreak-red-latest": Price(inputPerMillion: 12.5, cachedInputPerMillion: 1.25, outputPerMillion: 75, displayName: "Daybreak Red"),
         "gpt-5.5": Price(inputPerMillion: 5, cachedInputPerMillion: 0.5, outputPerMillion: 30, displayName: "GPT-5.5", priorityMultiplier: 2.5, fastCreditMultiplier: 2.5, longContext: true),
@@ -351,14 +379,15 @@ struct TokenPricingCatalog: Sendable {
         "gpt-5.4": Price(inputPerMillion: 2.5, cachedInputPerMillion: 0.25, outputPerMillion: 15, displayName: "GPT-5.4", priorityMultiplier: 2, fastCreditMultiplier: 2, longContext: true),
         "gpt-5.4-pro": Price(inputPerMillion: 30, cachedInputPerMillion: 30, outputPerMillion: 180, displayName: "GPT-5.4 Pro", longContext: true),
         "gpt-5.4-mini": Price(inputPerMillion: 0.75, cachedInputPerMillion: 0.075, outputPerMillion: 4.5, displayName: "GPT-5.4 Mini", priorityMultiplier: 2),
-        "gpt-5.4-nano": Price(inputPerMillion: 0.2, cachedInputPerMillion: 0.02, outputPerMillion: 1.25, displayName: "GPT-5.4 Nano"),
-        "gpt-5.3-codex": Price(inputPerMillion: 1.75, cachedInputPerMillion: 0.175, outputPerMillion: 14, displayName: "GPT-5.3 Codex"),
+        "gpt-5.4-nano": Price(inputPerMillion: 0.2, cachedInputPerMillion: 0.02, outputPerMillion: 1.25, displayName: "GPT-5.4 Nano", fastModeUnpriced: true),
+        "gpt-5.3-codex": Price(inputPerMillion: 1.75, cachedInputPerMillion: 0.175, outputPerMillion: 14, displayName: "GPT-5.3 Codex", priorityMultiplier: 2),
         "gpt-5.2": Price(inputPerMillion: 1.75, cachedInputPerMillion: 0.175, outputPerMillion: 14, displayName: "GPT-5.2", priorityMultiplier: 2),
         "gpt-5.2-codex": Price(inputPerMillion: 1.75, cachedInputPerMillion: 0.175, outputPerMillion: 14, displayName: "GPT-5.2 Codex"),
         "claude-fable-5-1": claudePrice("Claude Fable 5.1", "10", "50", "0.25"),
         "claude-mythos-5-1": claudePrice("Claude Mythos 5.1", "10", "50", "0.25"),
         "claude-opus-5-5": claudePrice("Claude Opus 5.5", "4", "20", "0.2", fast: true),
-        "claude-sonnet-5-5": claudePrice("Claude Sonnet 5.5", "2", "10", "0.2"),
+        "claude-sonnet-5-5": claudePrice("Claude Sonnet 5.5", "2", "10", "0.1"),
+        "claude-haiku-5-5": claudePrice("Claude Haiku 5.5", "0.1", "0.5", "0.01", longContextAt: 100_000, longScale: 5),
         "claude-fable-5": claudePrice("Claude Fable 5", "10", "50", "1"),
         "claude-mythos-5": claudePrice("Claude Mythos 5", "10", "50", "1"),
         "claude-opus-5": claudePrice("Claude Opus 5", "5", "25", "0.5", fast: true),
@@ -383,7 +412,8 @@ struct TokenPricingCatalog: Sendable {
         _ read: String,
         fast: Bool = false,
         us: Bool = true,
-        longContextAt threshold: Int? = nil
+        longContextAt threshold: Int? = nil,
+        longScale: Decimal? = nil
     ) -> Price {
         Price(
             inputPerMillion: Decimal(string: input)!,
@@ -394,7 +424,9 @@ struct TokenPricingCatalog: Sendable {
             longContext: threshold != nil,
             fastModeUnpriced: !fast,
             usDataResidency: us,
-            longContextThreshold: threshold
+            longContextThreshold: threshold,
+            longInputScale: longScale ?? 2,
+            longOutputScale: longScale ?? Decimal(string: "1.5")!
         )
     }
 
@@ -414,27 +446,27 @@ struct TokenPricingCatalog: Sendable {
         isLongContext: Bool = false,
         inferenceGeo: String? = nil
     ) -> Cost? {
-        guard let price = price(for: model), let multiplier = speedMultiplier(for: price, serviceTier: serviceTier) else {
+        guard usage.isConsistent, let price = price(for: model), let multiplier = speedMultiplier(for: price, serviceTier: serviceTier) else {
             return nil
         }
 
         let long = isLongContext && price.longContext
         let geo = geoMultiplier(for: price, inferenceGeo: inferenceGeo)
         let cachedInput = max(0, usage.cachedInputTokens)
-        let writes5 = max(0, usage.cacheCreationInputTokens ?? 0)
+        let writes5 = max(0, usage.cacheCreationInputTokens ?? 0) + max(0, usage.cacheWriteInputTokens ?? 0)
         let writes1 = max(0, usage.cacheCreation1hInputTokens ?? 0)
         if writes5 == 0, writes1 == 0, geo == 1 {
             let uncachedInput = max(0, usage.inputTokens - cachedInput)
             return Cost(
-                uncachedInput: Decimal(uncachedInput) / 1_000_000 * price.inputPerMillion * multiplier * (long ? 2 : 1),
-                cachedInput: Decimal(cachedInput) / 1_000_000 * price.cachedInputPerMillion * multiplier * (long ? 2 : 1),
-                output: Decimal(usage.outputTokens) / 1_000_000 * price.outputPerMillion * multiplier * (long ? 1.5 : 1)
+                uncachedInput: Decimal(uncachedInput) / 1_000_000 * price.inputPerMillion * multiplier * (long ? price.longInputScale : 1),
+                cachedInput: Decimal(cachedInput) / 1_000_000 * price.cachedInputPerMillion * multiplier * (long ? price.longInputScale : 1),
+                output: Decimal(usage.outputTokens) / 1_000_000 * price.outputPerMillion * multiplier * (long ? price.longOutputScale : 1)
             )
         }
 
         let fresh = max(0, usage.inputTokens - cachedInput - writes5 - writes1)
-        let inputScale = multiplier * geo * (long ? 2 : 1)
-        let outputScale = multiplier * geo * (long ? Decimal(string: "1.5")! : 1)
+        let inputScale = multiplier * geo * (long ? price.longInputScale : 1)
+        let outputScale = multiplier * geo * (long ? price.longOutputScale : 1)
         let write5Rate = Decimal(string: "1.25")!
         let uncached = (
             Decimal(fresh) * price.inputPerMillion
@@ -455,17 +487,16 @@ struct TokenPricingCatalog: Sendable {
         isLongContext: Bool = false,
         inferenceGeo: String? = nil
     ) -> Decimal? {
-        guard let price = price(for: model), let multiplier = speedMultiplier(for: price, serviceTier: serviceTier) else {
+        guard usage.isConsistent, let price = price(for: model), let multiplier = speedMultiplier(for: price, serviceTier: serviceTier) else {
             return nil
         }
         let geo = geoMultiplier(for: price, inferenceGeo: inferenceGeo)
-        let writes5 = max(0, usage.cacheCreationInputTokens ?? 0)
+        let writes5 = max(0, usage.cacheCreationInputTokens ?? 0) + max(0, usage.cacheWriteInputTokens ?? 0)
         let writes1 = max(0, usage.cacheCreation1hInputTokens ?? 0)
-        let longScale = (isLongContext && price.longContext) ? Decimal(2) : Decimal(1)
+        let longScale = (isLongContext && price.longContext) ? price.longInputScale : 1
         if writes5 == 0, writes1 == 0, geo == 1 {
             return Decimal(max(0, usage.cachedInputTokens)) / 1_000_000
-                * (price.inputPerMillion - price.cachedInputPerMillion)
-                * multiplier * ((isLongContext && price.longContext) ? 2 : 1)
+                * (price.inputPerMillion - price.cachedInputPerMillion) * multiplier * longScale
         }
         let scale = multiplier * geo * longScale
         let readSavings = Decimal(max(0, usage.cachedInputTokens)) / 1_000_000
@@ -499,14 +530,14 @@ struct TokenPricingCatalog: Sendable {
 
     private func speedMultiplier(for price: Price, serviceTier: String?) -> Decimal? {
         switch serviceTier?.lowercased() {
-        case "unpriced":
-            return nil
         case "ultrafast":
             return price.ultrafastMultiplier
         case "priority", "fast":
             return price.fastModeUnpriced ? nil : price.priorityMultiplier
-        default:
+        case nil, "", "default", "standard", "auto":
             return 1
+        default:
+            return nil
         }
     }
 
@@ -533,7 +564,7 @@ struct SessionLogFile {
 }
 
 struct TokenUsageSessionIndex: Codable {
-    static let schemaVersion = 9
+    static let schemaVersion = 10
 
     var schemaVersion = TokenUsageSessionIndex.schemaVersion
     var claudeParserVersion: Int? = nil
@@ -589,6 +620,7 @@ struct TokenUsagePayload: Codable, Hashable {
     let totalTokens: Int
     var cacheCreationInputTokens: Int? = nil
     var cacheCreation1hInputTokens: Int? = nil
+    var cacheWriteInputTokens: Int? = nil
 
     static let zero = TokenUsagePayload(
         inputTokens: 0,
@@ -606,18 +638,20 @@ struct TokenUsagePayload: Codable, Hashable {
             reasoningOutputTokens: reasoningOutputTokens + other.reasoningOutputTokens,
             totalTokens: totalTokens + other.totalTokens,
             cacheCreationInputTokens: Self.combined(cacheCreationInputTokens, other.cacheCreationInputTokens, +),
-            cacheCreation1hInputTokens: Self.combined(cacheCreation1hInputTokens, other.cacheCreation1hInputTokens, +)
+            cacheCreation1hInputTokens: Self.combined(cacheCreation1hInputTokens, other.cacheCreation1hInputTokens, +),
+            cacheWriteInputTokens: Self.combined(cacheWriteInputTokens, other.cacheWriteInputTokens, +)
         )
     }
 
     var isConsistent: Bool {
         let writes5 = cacheCreationInputTokens ?? 0
         let writes1 = cacheCreation1hInputTokens ?? 0
+        let writes = cacheWriteInputTokens ?? 0
         return inputTokens >= 0 && cachedInputTokens >= 0 && outputTokens >= 0 && reasoningOutputTokens >= 0
-            && writes5 >= 0 && writes1 >= 0
+            && writes5 >= 0 && writes1 >= 0 && writes >= 0
             && cachedInputTokens <= inputTokens && reasoningOutputTokens <= outputTokens
             && totalTokens >= inputTokens && totalTokens - inputTokens == outputTokens
-            && cachePartsFit(cachedInputTokens, writes5, writes1, within: inputTokens)
+            && cachePartsFit(cachedInputTokens, writes5, writes1, writes, within: inputTokens)
     }
 
     func delta(since previous: TokenUsagePayload) -> TokenUsagePayload? {
@@ -630,12 +664,13 @@ struct TokenUsagePayload: Codable, Hashable {
             reasoningOutputTokens: reasoningOutputTokens - previous.reasoningOutputTokens,
             totalTokens: totalTokens - previous.totalTokens,
             cacheCreationInputTokens: writes5,
-            cacheCreation1hInputTokens: writes1
+            cacheCreation1hInputTokens: writes1,
+            cacheWriteInputTokens: Self.combined(cacheWriteInputTokens, previous.cacheWriteInputTokens, -)
         )
         if [delta.inputTokens, delta.cachedInputTokens, delta.outputTokens, delta.reasoningOutputTokens, delta.totalTokens].contains(where: { $0 < 0 }) {
             return nil
         }
-        if (writes5 ?? 0) < 0 || (writes1 ?? 0) < 0 {
+        if (writes5 ?? 0) < 0 || (writes1 ?? 0) < 0 || (delta.cacheWriteInputTokens ?? 0) < 0 {
             return nil
         }
         return delta
@@ -663,6 +698,7 @@ struct TokenUsagePayload: Codable, Hashable {
         case totalTokens = "total_tokens"
         case cacheCreationInputTokens = "cache_creation_input_tokens"
         case cacheCreation1hInputTokens = "cache_creation_1h_input_tokens"
+        case cacheWriteInputTokens = "cache_write_input_tokens"
     }
 }
 

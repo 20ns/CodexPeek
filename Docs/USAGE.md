@@ -24,6 +24,8 @@ Selecting a managed account changes which profile CodexPeek reads. Choosing Open
 
 ## Refresh timing
 
+Use **Providers** in the menu to pick a primary service and choose which others to track. The primary service drives the menu-bar icon, leads the menu, and is always tracked. Tick or untick the other service under **Show in Menu**. Codex is the default primary and both start enabled, so existing setups look the same. Choices persist across app restarts. Unticking a service hides its menu section and pauses its requests, token scans, and file watching. Saved history and credentials stay on disk.
+
 Codex limits and token estimates refresh every five minutes. Startup and explicit account switches also load usage. Manual refresh pulls immediately and restarts the five-minute wait.
 
 Opening menus or history, waking the Mac, and auth-file writes do not trigger a Codex usage request. Token scans run off the main thread and reuse cached records for unchanged session files.
@@ -35,8 +37,10 @@ Claude account limits refresh on startup, every five minutes, and on manual refr
 CodexPeek calls `https://api.anthropic.com/api/oauth/usage` with the signed-in Claude Code account's credentials. It checks these sources in order:
 
 1. `CLAUDE_CODE_OAUTH_TOKEN`.
-2. `.credentials.json` in the Claude config directory.
-3. The macOS `Claude Code-credentials` Keychain entry.
+2. The macOS `Claude Code-credentials` Keychain entry for the default profile.
+3. `.credentials.json` in the Claude config directory.
+
+Stored credentials with a declared expiry or scope must be unexpired and include `user:profile`. An expired Keychain login can fall back to a valid file. Custom `CLAUDE_CONFIG_DIR` profiles use their own credential file and never borrow the default account's Keychain login.
 
 Credentials stay in memory and go only to Anthropic. CodexPeek does not refresh tokens or change Claude's login. If authentication expires, sign in again through Claude Code.
 
@@ -44,13 +48,15 @@ Account requests work without a terminal status line, including Claude Code app 
 
 The app keeps the last valid reading when a request fails, shows its age, and reports the failure. Readings become stale after five minutes. Each expired window disappears until a new reading arrives. Missing data stays unavailable.
 
-Rate-limited requests wait at least five minutes and respect longer server retry delays. Manual refresh does not bypass that cooldown.
+Rate-limited requests wait at least 4.5 minutes and respect longer server retry delays. Manual refresh does not bypass that cooldown.
 
 ### Optional status-line bridge
 
 Choose Enable Claude local usage in the menu to install the bridge. It captures quota data supplied to [Claude Code's status line](https://code.claude.com/docs/en/statusline#rate-limit-usage) and saves it locally. The installer preserves an existing status-line command and other settings, and backs up settings before the first edit.
 
 Terminal readings require supported subscription data and a response in the session. The bridge is optional because account requests already supply quota readings.
+
+The status-line feed is Anthropic's documented integration and avoids separate authenticated requests during terminal activity. Account polling covers idle and app sessions but depends on an undocumented endpoint. Anthropic's [Usage and Cost Admin API](https://platform.claude.com/docs/en/manage-claude/usage-cost-api) reports organization API billing, so it cannot replace individual Pro or Max quota readings.
 
 From a built app, you can also install it with:
 
@@ -68,7 +74,7 @@ The helper and `codexpeek-usage.json` live in `~/.claude`, or `CLAUDE_CONFIG_DIR
 
 ## Token history and dollar estimates
 
-History uses retained local logs. Codex scans include active and archived sessions. Claude scans include subagent logs. The Max chart range includes all retained detailed logs; deleted logs cannot be reconstructed.
+History uses retained local logs. Codex scans include active and archived sessions. Codex compresses older logs as `.jsonl.zst`; macOS cannot read those natively, so they count only when the `zstd` command is installed (for example `brew install zstd`). Claude scans include subagent logs. The Max chart range includes all retained detailed logs; deleted logs cannot be reconstructed.
 
 Menu estimates use rolling 7-day and 30-day periods. Charts group usage by calendar day, so their totals can differ from the menu.
 
@@ -76,7 +82,7 @@ Dollar amounts use the model prices in the app. They estimate API-equivalent val
 
 For the upstream rates, see [OpenAI API pricing](https://developers.openai.com/api/docs/pricing) and [Anthropic API pricing](https://platform.claude.com/docs/en/about-claude/pricing). CodexPeek's price catalog needs an app update when rates change.
 
-Codex estimates account for cached input, Fast rates, and long-context rates where the app has a matching price.
+Codex estimates account for cached input, cache writes, Fast and Ultrafast rates, and long-context rates where the app has a matching price. Cache writes use their own input rate, and reasoning tokens are already included in output tokens. Unknown processing tiers keep their token counts without a dollar estimate. The price catalog was checked against OpenAI's published rates on October 9, 2026.
 
 Claude estimates separate regular input, output, cache reads, 5-minute cache writes, and 1-hour cache writes. Structured cache durations are not counted again in the aggregate. Older logs without a cache duration use the 5-minute write rate.
 

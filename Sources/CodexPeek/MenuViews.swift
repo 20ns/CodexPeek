@@ -118,7 +118,7 @@ final class HeaderMenuItemView: NSView {
 final class UsageMenuItemView: NSView {
     private let titleField = NSTextField(labelWithString: "")
     private let detailField = NSTextField(labelWithString: "")
-    private let progressIndicator = NSProgressIndicator()
+    private let bar = UsageBarView(tint: .systemBlue)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 64))
@@ -133,24 +133,26 @@ final class UsageMenuItemView: NSView {
     func update(title: String, window: RateLimitWindowSnapshot?, isDimmed: Bool = false, overrideDetail: String? = nil) {
         titleField.stringValue = title
 
+        bar.fraction = window.map { CGFloat($0.usedPercent) / 100 }
+        bar.setAccessibilityLabel(title)
+        bar.setAccessibilityValue(window?.usedPercent)
+        bar.setAccessibilityValueDescription(window == nil ? "Unavailable" : nil)
+
         if let overrideDetail {
-            progressIndicator.doubleValue = Double(window?.usedPercent ?? 0)
             detailField.stringValue = overrideDetail
         } else if let window {
-            progressIndicator.doubleValue = Double(window.usedPercent)
             if let resetDate = window.resetsAt {
                 detailField.stringValue = "\(window.usedPercent)% used • \(UIFormatters.usageResetCountdownString(from: resetDate))"
             } else {
                 detailField.stringValue = "\(window.usedPercent)% used • reset unavailable"
             }
         } else {
-            progressIndicator.doubleValue = 0
             detailField.stringValue = "Unavailable"
         }
 
         let alpha: CGFloat = isDimmed ? 0.45 : 1.0
         titleField.alphaValue = alpha
-        progressIndicator.alphaValue = alpha
+        bar.alphaValue = alpha
         detailField.alphaValue = alpha
     }
 
@@ -162,13 +164,9 @@ final class UsageMenuItemView: NSView {
         detailField.maximumNumberOfLines = 1
         detailField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        progressIndicator.isIndeterminate = false
-        progressIndicator.minValue = 0
-        progressIndicator.maxValue = 100
-        progressIndicator.controlSize = .small
-        progressIndicator.style = .bar
+        bar.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView(views: [titleField, progressIndicator, detailField])
+        let stack = NSStackView(views: [titleField, bar, detailField])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
@@ -181,7 +179,8 @@ final class UsageMenuItemView: NSView {
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-            progressIndicator.widthAnchor.constraint(equalToConstant: 290)
+            bar.widthAnchor.constraint(equalToConstant: 290),
+            bar.heightAnchor.constraint(equalToConstant: 6)
         ])
     }
 }
@@ -191,7 +190,7 @@ final class CompactSupplementalUsageMenuItemView: NSView {
     private let titleField = NSTextField(labelWithString: "")
     private let detailField = NSTextField(labelWithString: "")
     private let weeklyField = NSTextField(labelWithString: "")
-    private let progressIndicator = NSProgressIndicator()
+    private let bar = UsageBarView(tint: .systemBlue)
     private let detailSpacer = NSView()
 
     override init(frame frameRect: NSRect) {
@@ -207,9 +206,13 @@ final class CompactSupplementalUsageMenuItemView: NSView {
     func update(snapshot: SupplementalRateLimitSnapshot?) {
         titleField.stringValue = snapshot?.title ?? "5.3 Spark"
 
-        if let snapshot {
-            progressIndicator.doubleValue = Double(snapshot.primary?.usedPercent ?? 0)
+        let window = snapshot?.primary
+        bar.fraction = window.map { CGFloat($0.usedPercent) / 100 }
+        bar.setAccessibilityLabel(titleField.stringValue)
+        bar.setAccessibilityValue(window?.usedPercent)
+        bar.setAccessibilityValueDescription(window == nil ? "Unavailable" : nil)
 
+        if let snapshot {
             if snapshot.isWeeklyExhausted {
                 detailField.stringValue = "Weekly limit reached"
             } else if let primaryReset = snapshot.primary?.resetsAt {
@@ -228,7 +231,6 @@ final class CompactSupplementalUsageMenuItemView: NSView {
                 weeklyField.isHidden = true
             }
         } else {
-            progressIndicator.doubleValue = 0
             detailField.stringValue = "Unavailable"
             weeklyField.stringValue = ""
             weeklyField.isHidden = true
@@ -251,11 +253,7 @@ final class CompactSupplementalUsageMenuItemView: NSView {
         detailSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         detailSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        progressIndicator.isIndeterminate = false
-        progressIndicator.minValue = 0
-        progressIndicator.maxValue = 100
-        progressIndicator.controlSize = .small
-        progressIndicator.style = .bar
+        bar.translatesAutoresizingMaskIntoConstraints = false
 
         let detailRow = NSStackView(views: [detailField, detailSpacer, weeklyField])
         detailRow.orientation = .horizontal
@@ -263,7 +261,7 @@ final class CompactSupplementalUsageMenuItemView: NSView {
         detailRow.spacing = 8
         detailRow.distribution = .fill
 
-        let stack = NSStackView(views: [titleField, progressIndicator, detailRow])
+        let stack = NSStackView(views: [titleField, bar, detailRow])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
@@ -276,7 +274,8 @@ final class CompactSupplementalUsageMenuItemView: NSView {
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 9),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9),
-            progressIndicator.widthAnchor.constraint(equalToConstant: 290),
+            bar.widthAnchor.constraint(equalToConstant: 290),
+            bar.heightAnchor.constraint(equalToConstant: 6),
             weeklyField.widthAnchor.constraint(greaterThanOrEqualToConstant: 48)
         ])
     }
@@ -461,13 +460,15 @@ final class MenuSectionHeaderView: NSView {
 }
 
 @MainActor
-final class OrangeUsageBarView: NSView {
+final class UsageBarView: NSView {
+    private let tint: NSColor
     var fraction: CGFloat? {
         didSet { needsDisplay = true }
     }
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    init(tint: NSColor = .systemOrange) {
+        self.tint = tint
+        super.init(frame: .zero)
         setAccessibilityElement(true)
         setAccessibilityRole(.progressIndicator)
         setAccessibilityMinValue(0)
@@ -492,13 +493,13 @@ final class OrangeUsageBarView: NSView {
         guard rect.width > 0, rect.height > 0 else { return }
         let radius = rect.height / 2
         let trackAlpha: CGFloat = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? 0.45 : 0.22
-        NSColor.systemOrange.withAlphaComponent(trackAlpha).setFill()
+        tint.withAlphaComponent(trackAlpha).setFill()
         NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
         guard let fraction, fraction > 0 else { return }
         var fill = rect
         fill.size.width = rect.width * min(max(fraction, 0), 1)
         guard fill.width > 0 else { return }
-        NSColor.systemOrange.setFill()
+        tint.setFill()
         NSBezierPath(roundedRect: fill, xRadius: radius, yRadius: radius).fill()
     }
 }
@@ -507,7 +508,7 @@ final class OrangeUsageBarView: NSView {
 final class ClaudeUsageMenuItemView: NSView {
     private let titleField = NSTextField(labelWithString: "")
     private let detailField = NSTextField(labelWithString: "")
-    private let bar = OrangeUsageBarView()
+    private let bar = UsageBarView()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 64))
