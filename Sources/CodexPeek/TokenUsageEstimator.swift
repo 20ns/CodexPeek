@@ -426,6 +426,14 @@ struct TokenPricingCatalog: Sendable {
             .sorted { $0.prefix.count > $1.prefix.count }
     }
 
+    private static let write5Rate = Decimal(string: "1.25")!
+    private static let write5Premium = Decimal(string: "0.25")!
+
+    /// Exact tokens ÷ 1M by shifting the exponent; Decimal division is the scan's hottest path.
+    private static func perMillion(_ value: Decimal) -> Decimal {
+        Decimal(sign: .plus, exponent: -6, significand: value)
+    }
+
     func estimateCost(
         for model: String,
         usage: TokenUsagePayload,
@@ -445,25 +453,24 @@ struct TokenPricingCatalog: Sendable {
         if writes5 == 0, writes1 == 0, geo == 1 {
             let uncachedInput = max(0, usage.inputTokens - cachedInput)
             return Cost(
-                uncachedInput: Decimal(uncachedInput) / 1_000_000 * price.inputPerMillion * multiplier * (long ? price.longInputScale : 1),
-                cachedInput: Decimal(cachedInput) / 1_000_000 * price.cachedInputPerMillion * multiplier * (long ? price.longInputScale : 1),
-                output: Decimal(usage.outputTokens) / 1_000_000 * price.outputPerMillion * multiplier * (long ? price.longOutputScale : 1)
+                uncachedInput: Self.perMillion(Decimal(uncachedInput)) * price.inputPerMillion * multiplier * (long ? price.longInputScale : 1),
+                cachedInput: Self.perMillion(Decimal(cachedInput)) * price.cachedInputPerMillion * multiplier * (long ? price.longInputScale : 1),
+                output: Self.perMillion(Decimal(usage.outputTokens)) * price.outputPerMillion * multiplier * (long ? price.longOutputScale : 1)
             )
         }
 
         let fresh = max(0, usage.inputTokens - cachedInput - writes5 - writes1)
         let inputScale = multiplier * geo * (long ? price.longInputScale : 1)
         let outputScale = multiplier * geo * (long ? price.longOutputScale : 1)
-        let write5Rate = Decimal(string: "1.25")!
-        let uncached = (
+        let uncached = Self.perMillion(
             Decimal(fresh) * price.inputPerMillion
-                + Decimal(writes5) * price.inputPerMillion * write5Rate
+                + Decimal(writes5) * price.inputPerMillion * Self.write5Rate
                 + Decimal(writes1) * price.inputPerMillion * 2
-        ) / 1_000_000 * inputScale
+        ) * inputScale
         return Cost(
             uncachedInput: uncached,
-            cachedInput: Decimal(cachedInput) / 1_000_000 * price.cachedInputPerMillion * inputScale,
-            output: Decimal(max(0, usage.outputTokens)) / 1_000_000 * price.outputPerMillion * outputScale
+            cachedInput: Self.perMillion(Decimal(cachedInput)) * price.cachedInputPerMillion * inputScale,
+            output: Self.perMillion(Decimal(max(0, usage.outputTokens))) * price.outputPerMillion * outputScale
         )
     }
 
@@ -482,14 +489,14 @@ struct TokenPricingCatalog: Sendable {
         let writes1 = max(0, usage.cacheCreation1hInputTokens ?? 0)
         let longScale = (isLongContext && price.longContext) ? price.longInputScale : 1
         if writes5 == 0, writes1 == 0, geo == 1 {
-            return Decimal(max(0, usage.cachedInputTokens)) / 1_000_000
+            return Self.perMillion(Decimal(max(0, usage.cachedInputTokens)))
                 * (price.inputPerMillion - price.cachedInputPerMillion) * multiplier * longScale
         }
         let scale = multiplier * geo * longScale
-        let readSavings = Decimal(max(0, usage.cachedInputTokens)) / 1_000_000
+        let readSavings = Self.perMillion(Decimal(max(0, usage.cachedInputTokens)))
             * (price.inputPerMillion - price.cachedInputPerMillion) * scale
-        let writePremium = Decimal(writes5) / 1_000_000 * price.inputPerMillion * Decimal(string: "0.25")! * scale
-            + Decimal(writes1) / 1_000_000 * price.inputPerMillion * scale
+        let writePremium = Self.perMillion(Decimal(writes5)) * price.inputPerMillion * Self.write5Premium * scale
+            + Self.perMillion(Decimal(writes1)) * price.inputPerMillion * scale
         return readSavings - writePremium
     }
 

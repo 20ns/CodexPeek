@@ -99,9 +99,19 @@ final class ClaudeCodeTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         for path in grouped.keys.sorted() {
             let requests = grouped[path]!.map { $0.record }
             historyRequests.append(contentsOf: requests)
-            add(requests, since: nil, to: &report.allTime, totalsByModel: &allModels)
-            add(requests, since: monthCutoff, to: &report.month, totalsByModel: &monthModels)
-            add(requests, since: weekCutoff, to: &report.week, totalsByModel: &weekModels)
+            // Price each request once; the three windows overlap.
+            let priced = requests.map { request in
+                (request: request, model: pricingCatalog.displayModelName(for: request.model), cost: pricingCatalog.estimateCost(
+                    for: request.model,
+                    usage: request.usage,
+                    serviceTier: request.serviceTier,
+                    isLongContext: request.isLongContext == true,
+                    inferenceGeo: request.inferenceGeo
+                ))
+            }
+            add(priced, since: nil, to: &report.allTime, totalsByModel: &allModels)
+            add(priced, since: monthCutoff, to: &report.month, totalsByModel: &monthModels)
+            add(priced, since: weekCutoff, to: &report.week, totalsByModel: &weekModels)
         }
 
         report.week.topModel = weekModels.max { $0.value < $1.value }?.key
@@ -147,14 +157,14 @@ final class ClaudeCodeTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     }
 
     private func add(
-        _ requests: [UsageRequestRecord],
+        _ requests: [(request: UsageRequestRecord, model: String, cost: TokenPricingCatalog.Cost?)],
         since cutoff: Date?,
         to summary: inout TokenUsageSummary,
         totalsByModel: inout [String: Int]
     ) {
         var selected = false
         var priced = false
-        for request in requests {
+        for (request, model, cost) in requests {
             if let cutoff, request.startedAt < cutoff { continue }
             selected = true
             summary.inputTokens += request.usage.inputTokens
@@ -162,14 +172,8 @@ final class ClaudeCodeTokenUsageSource: TokenUsageSource, @unchecked Sendable {
             summary.outputTokens += request.usage.outputTokens
             summary.reasoningOutputTokens += request.usage.reasoningOutputTokens
             summary.totalTokens += request.usage.totalTokens
-            totalsByModel[pricingCatalog.displayModelName(for: request.model), default: 0] += request.usage.totalTokens
-            guard let cost = pricingCatalog.estimateCost(
-                for: request.model,
-                usage: request.usage,
-                serviceTier: request.serviceTier,
-                isLongContext: request.isLongContext == true,
-                inferenceGeo: request.inferenceGeo
-            ) else { continue }
+            totalsByModel[model, default: 0] += request.usage.totalTokens
+            guard let cost else { continue }
             summary.estimatedCostUSD += cost.total
             summary.uncachedInputCostUSD += cost.uncachedInput
             summary.cachedInputCostUSD += cost.cachedInput

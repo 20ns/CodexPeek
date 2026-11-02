@@ -1,5 +1,9 @@
 # Release Notes
 
+## 1.0.12
+
+- Price each Claude request once per scan and divide by a million with an exact exponent shift, cutting the 5-minute Claude scan from about 0.8 to 0.3 seconds with identical totals.
+
 ## 1.0.11
 
 - Redesign Usage History: translucent glass look that follows light and dark mode, Combined by default, stacked bars by service, full model names, month labels on long ranges, and no stuck loading states when one service has no data.
