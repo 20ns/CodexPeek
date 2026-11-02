@@ -64,8 +64,8 @@ final class HeaderMenuItemView: NSView {
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         subtitleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        configureIconButton(refreshButton, symbolName: "arrow.clockwise", tooltip: "Refresh usage", action: #selector(refreshTapped))
-        configureIconButton(copyButton, symbolName: "doc.on.doc", tooltip: "Copy debug info", action: #selector(copyTapped))
+        configureIconButton(refreshButton, symbolName: "arrow.clockwise", tooltip: "Refresh usage", target: self, action: #selector(refreshTapped))
+        configureIconButton(copyButton, symbolName: "doc.on.doc", tooltip: "Copy debug info", target: self, action: #selector(copyTapped))
 
         let controls = NSStackView(views: [refreshButton, copyButton])
         controls.orientation = .horizontal
@@ -89,22 +89,6 @@ final class HeaderMenuItemView: NSView {
         ])
     }
 
-    private func configureIconButton(_ button: NSButton, symbolName: String, tooltip: String, action: Selector) {
-        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: tooltip)
-        button.bezelStyle = .inline
-        button.isBordered = false
-        button.imagePosition = .imageOnly
-        button.toolTip = tooltip
-        button.target = self
-        button.action = action
-        button.setButtonType(.momentaryChange)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 22),
-            button.heightAnchor.constraint(equalToConstant: 22)
-        ])
-    }
-
     @objc private func refreshTapped() {
         onRefresh?()
     }
@@ -112,6 +96,23 @@ final class HeaderMenuItemView: NSView {
     @objc private func copyTapped() {
         onCopyDebugInfo?()
     }
+}
+
+@MainActor
+private func configureIconButton(_ button: NSButton, symbolName: String, tooltip: String, target: AnyObject, action: Selector) {
+    button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: tooltip)
+    button.bezelStyle = .inline
+    button.isBordered = false
+    button.imagePosition = .imageOnly
+    button.toolTip = tooltip
+    button.target = target
+    button.action = action
+    button.setButtonType(.momentaryChange)
+    button.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+        button.widthAnchor.constraint(equalToConstant: 22),
+        button.heightAnchor.constraint(equalToConstant: 22)
+    ])
 }
 
 @MainActor
@@ -134,6 +135,7 @@ final class UsageMenuItemView: NSView {
         titleField.stringValue = title
 
         bar.fraction = window.map { CGFloat($0.usedPercent) / 100 }
+        bar.pace = window?.weeklyPace().map { CGFloat($0) }
         bar.setAccessibilityLabel(title)
         bar.setAccessibilityValue(window?.usedPercent)
         bar.setAccessibilityValueDescription(window == nil ? "Unavailable" : nil)
@@ -433,6 +435,8 @@ final class StatusMenuItemView: NSView {
 @MainActor
 final class MenuSectionHeaderView: NSView {
     private let labelField = NSTextField(labelWithString: "")
+    private let refreshButton = NSButton()
+    var onRefresh: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: 28))
@@ -440,13 +444,18 @@ final class MenuSectionHeaderView: NSView {
         labelField.font = .systemFont(ofSize: 12, weight: .semibold)
         labelField.textColor = .labelColor
         labelField.translatesAutoresizingMaskIntoConstraints = false
+        configureIconButton(refreshButton, symbolName: "arrow.clockwise", tooltip: "Refresh usage", target: self, action: #selector(refreshTapped))
+        refreshButton.isHidden = true
         addSubview(labelField)
+        addSubview(refreshButton)
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: 320),
             heightAnchor.constraint(equalToConstant: 28),
             labelField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            labelField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            labelField.centerYAnchor.constraint(equalTo: centerYAnchor)
+            labelField.trailingAnchor.constraint(equalTo: refreshButton.leadingAnchor, constant: -8),
+            labelField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            refreshButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            refreshButton.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
     }
 
@@ -454,8 +463,14 @@ final class MenuSectionHeaderView: NSView {
         nil
     }
 
-    func update(title: String) {
+    func update(title: String, showsRefresh: Bool = false, isRefreshing: Bool = false) {
         labelField.stringValue = title
+        refreshButton.isHidden = !showsRefresh
+        refreshButton.isEnabled = !isRefreshing
+    }
+
+    @objc private func refreshTapped() {
+        onRefresh?()
     }
 }
 
@@ -464,6 +479,13 @@ final class UsageBarView: NSView {
     private let tint: NSColor
     var fraction: CGFloat? {
         didSet { needsDisplay = true }
+    }
+    /// Where usage would sit at an even pace; left of the fill means ahead of it.
+    var pace: CGFloat? {
+        didSet {
+            needsDisplay = true
+            setAccessibilityHelp(pace.map { "Even pace would be \(Int(($0 * 100).rounded()))% by now" })
+        }
     }
 
     init(tint: NSColor = .systemOrange) {
@@ -495,12 +517,19 @@ final class UsageBarView: NSView {
         let trackAlpha: CGFloat = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? 0.45 : 0.22
         tint.withAlphaComponent(trackAlpha).setFill()
         NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
-        guard let fraction, fraction > 0 else { return }
-        var fill = rect
-        fill.size.width = rect.width * min(max(fraction, 0), 1)
-        guard fill.width > 0 else { return }
-        tint.setFill()
-        NSBezierPath(roundedRect: fill, xRadius: radius, yRadius: radius).fill()
+        if let fraction, fraction > 0 {
+            var fill = rect
+            fill.size.width = rect.width * min(fraction, 1)
+            tint.setFill()
+            NSBezierPath(roundedRect: fill, xRadius: radius, yRadius: radius).fill()
+        }
+        guard let pace else { return }
+        // A label-coloured tick with a background halo stays visible on both the track and the fill.
+        let x = ((rect.width - 2) * pace).rounded()
+        NSColor.windowBackgroundColor.setFill()
+        NSRect(x: x - 1, y: rect.minY, width: 4, height: rect.height).fill()
+        NSColor.labelColor.setFill()
+        NSRect(x: x, y: rect.minY, width: 2, height: rect.height).fill()
     }
 }
 
@@ -525,6 +554,7 @@ final class ClaudeUsageMenuItemView: NSView {
         bar.setAccessibilityLabel(title)
         if let window {
             bar.fraction = CGFloat(window.usedPercent) / 100
+            bar.pace = window.weeklyPace().map { CGFloat($0) }
             bar.setAccessibilityValue(window.usedPercent)
             bar.setAccessibilityValueDescription(nil)
             if let resetDate = window.resetsAt {
@@ -534,6 +564,7 @@ final class ClaudeUsageMenuItemView: NSView {
             }
         } else {
             bar.fraction = nil
+            bar.pace = nil
             bar.setAccessibilityValue(nil)
             bar.setAccessibilityValueDescription("Unavailable")
             detailField.stringValue = "Unavailable"

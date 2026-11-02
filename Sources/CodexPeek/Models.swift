@@ -75,6 +75,13 @@ struct RateLimitWindowSnapshot: Codable, Equatable {
         guard let windowDurationMins else { return false }
         return windowDurationMins < 1440
     }
+
+    /// Usage share an even burn would have reached by now. Weekly only: a 5-hour window resets too soon to pace.
+    func weeklyPace(now: Date = Date()) -> Double? {
+        guard isWeekly, let resetsAt, resetsAt > now, let windowDurationMins else { return nil }
+        let remaining = resetsAt.timeIntervalSince(now) / (Double(windowDurationMins) * 60)
+        return min(max(1 - remaining, 0), 1)
+    }
 }
 
 struct SupplementalRateLimitSnapshot: Codable, Equatable {

@@ -32,11 +32,12 @@ The menu is native AppKit. The history window uses Swift Charts. There are no pa
 - Codex 5-hour and weekly usage, reset countdowns, and Spark limits when available.
 - Claude Code 5-hour and weekly usage in a separate section.
 - A primary service of your choice (Codex or Claude Code) in the menu-bar icon, with the other one optional.
+- A pace mark on weekly bars: usage short of the mark means you can burn faster before the reset.
 - Daily and hourly token history by model, including retained archived Codex sessions and Claude subagent logs.
 - Codex, Claude Code, or combined history, with API-equivalent estimates for the last 7 days, 30 days, and all retained logs.
 - The active Codex account and plan, with account switching from the menu.
 
-Usage refreshes every five minutes. Use the refresh button to pull it immediately. Launch at Login is available in the app menu.
+Usage refreshes every five minutes. Use the refresh button at the top right of the menu to pull everything immediately. Launch at Login is available in the app menu.
 
 Dollar amounts estimate what the recorded tokens would cost at API rates. They are not your subscription bill. Missing logs and unknown model prices can leave gaps.
 

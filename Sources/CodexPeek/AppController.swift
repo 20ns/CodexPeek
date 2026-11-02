@@ -60,7 +60,6 @@ final class AppController: NSObject, NSMenuDelegate {
     private let claudePrimaryItem = NSMenuItem(title: "Claude Code", action: #selector(selectPrimary), keyEquivalent: "")
     private let codexToggleItem = NSMenuItem(title: "Codex", action: #selector(toggleCodex), keyEquivalent: "")
     private let claudeToggleItem = NSMenuItem(title: "Claude Code", action: #selector(toggleClaude), keyEquivalent: "")
-    private let refreshItem = NSMenuItem(title: "Refresh Usage", action: #selector(refreshNow), keyEquivalent: "")
     private let codexHeaderSeparator = NSMenuItem.separator()
     private let sectionSeparator = NSMenuItem.separator()
     private let removeAccountItem = NSMenuItem(title: "Remove Current Account…", action: #selector(removeCurrentAccount), keyEquivalent: "")
@@ -480,12 +479,13 @@ final class AppController: NSObject, NSMenuDelegate {
         logoutItem.target = self
         openCodexItem.target = self
         historyItem.target = self
-        refreshItem.target = self
         removeAccountItem.target = self
         quitItem.target = self
         enableClaudeItem.target = self
-        claudeSectionView.update(title: "Claude Code")
         headerView.onRefresh = { [weak self] in
+            self?.refreshNow()
+        }
+        claudeSectionView.onRefresh = { [weak self] in
             self?.refreshNow()
         }
         headerView.onCopyDebugInfo = { [weak self] in
@@ -501,7 +501,7 @@ final class AppController: NSObject, NSMenuDelegate {
         let claude = [claudeSectionItem, claudeFiveHourItem, claudeWeeklyItem, claudeTokenCostItem, claudeStatusItem, enableClaudeItem]
         let sections = primaryProvider == .codex ? codex + [sectionSeparator] + claude : claude + [sectionSeparator] + codex
         menu.items = sections + [
-            .separator(), refreshItem, historyItem, providersItem, accountsItem,
+            .separator(), historyItem, providersItem, accountsItem,
             .separator(), launchAtLoginItem, logoutItem, openCodexItem,
             .separator(), quitItem
         ]
@@ -747,6 +747,8 @@ final class AppController: NSObject, NSMenuDelegate {
             )
         }
         claudeStatusView.update(message: claudeStatusMessage())
+        // Whichever section leads the menu carries the refresh button; Codex's header has its own.
+        claudeSectionView.update(title: "Claude Code", showsRefresh: primaryProvider == .claude, isRefreshing: claudeUsageTask != nil)
         claudeTokenCostView.update(
             report: claudeTokenReport,
             isRefreshing: claudeTokenTask != nil,
@@ -1379,7 +1381,7 @@ final class AppController: NSObject, NSMenuDelegate {
             return claudeUsageError + time
         }
         guard let claudeSnapshot else {
-            return claudeUsageTask == nil ? "Claude usage unavailable • use Refresh Usage" : "Fetching Claude usage…"
+            return claudeUsageTask == nil ? "Claude usage unavailable • use the refresh button" : "Fetching Claude usage…"
         }
         let time = UIFormatters.usageUpdatedString(from: claudeSnapshot.updatedAt)
         return claudeSnapshot.isStale ? "Claude usage updated \(time) • stale" : "From Claude Code • updated \(time)"

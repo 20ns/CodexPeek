@@ -26,6 +26,8 @@ Selecting a managed account changes which profile CodexPeek reads. Choosing Open
 
 Use **Providers** in the menu to pick a primary service and choose which others to track. The primary service drives the menu-bar icon, leads the menu, and is always tracked. Tick or untick the other service under **Show in Menu**. Codex is the default primary and both start enabled, so existing setups look the same. Choices persist across app restarts. Unticking a service hides its menu section and pauses its requests, token scans, and file watching. Saved history and credentials stay on disk.
 
+Weekly bars carry a pace mark: the share of the week already elapsed, which is where usage would sit if you spread the limit evenly until the reset. A fill short of the mark means you have room to spare; past it means you're on track to hit the limit early. The 5-hour window resets too often to need one.
+
 Codex limits and token estimates refresh every five minutes. Startup and explicit account switches also load usage. Manual refresh pulls immediately and restarts the five-minute wait.
 
 Opening menus or history, waking the Mac, and auth-file writes do not trigger a Codex usage request. Token scans run off the main thread and reuse cached records for unchanged session files.

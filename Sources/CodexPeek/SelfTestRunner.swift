@@ -1539,6 +1539,12 @@ struct SelfTestRunner {
 
         try expect(snapshot.isWeeklyExhausted, "weekly exhaustion should be detected")
         try expect(snapshot.secondary?.isExhausted == true, "secondary window exhaustion mismatch")
+        let paceNow = Date(timeIntervalSince1970: 1_800_000_000)
+        let week = RateLimitWindowSnapshot(usedPercent: 30, windowDurationMins: 10080, resetsAt: paceNow.addingTimeInterval(3 * 86_400))
+        let pace = try unwrap(week.weeklyPace(now: paceNow), "weekly pace missing")
+        try expect(abs(pace - 4.0 / 7) < 1e-9, "weekly pace should be the elapsed share")
+        try expect(RateLimitWindowSnapshot(usedPercent: 30, windowDurationMins: 300, resetsAt: paceNow).weeklyPace(now: paceNow) == nil, "5-hour windows have no pace")
+        try expect(RateLimitWindowSnapshot(usedPercent: 30, windowDurationMins: 10080, resetsAt: paceNow.addingTimeInterval(-60)).weeklyPace(now: paceNow) == nil, "a passed reset has no pace")
 
         let singleWindow = CodexUsageSnapshot(
             account: CodexAccountSnapshot(email: "nav@example.com", authMode: .chatgpt, planType: .prolite),

@@ -1,5 +1,10 @@
 # Release Notes
 
+## 1.0.10
+
+- Add a pace mark to weekly bars showing where an even burn would be before the reset.
+- Put a refresh button at the top right of the menu whichever service leads it, and drop the separate Refresh Usage item.
+
 ## 1.0.9
 
 - Choose a primary service (Codex or Claude Code) for the menu-bar icon and top of the menu, and tick or untick the other.
