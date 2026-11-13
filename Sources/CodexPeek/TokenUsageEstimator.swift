@@ -25,18 +25,19 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
 
     private let sessionsRootURL: URL
     private let fileManager: FileManager
-    private let pricingCatalog: TokenPricingCatalog
+    private let pinnedCatalog: TokenPricingCatalog?
+    private var pricingCatalog: TokenPricingCatalog { pinnedCatalog ?? .standard }
     private let indexStore: TokenUsageSessionIndexStoring?
 
     init(
         sessionsRootURL: URL = URL(fileURLWithPath: NSString(string: "~/.codex/sessions").expandingTildeInPath),
         fileManager: FileManager = .default,
-        pricingCatalog: TokenPricingCatalog = .standard,
+        pricingCatalog: TokenPricingCatalog? = nil,
         indexStore: TokenUsageSessionIndexStoring? = nil
     ) {
         self.sessionsRootURL = sessionsRootURL
         self.fileManager = fileManager
-        self.pricingCatalog = pricingCatalog
+        pinnedCatalog = pricingCatalog
         self.indexStore = indexStore
     }
 
@@ -122,6 +123,7 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         to summary: inout TokenUsageSummary,
         totalsByModel: inout [String: Int]
     ) {
+        let pricingCatalog = pricingCatalog
         var selectedAny = false
         var priced = false
 
@@ -324,9 +326,9 @@ final class TokenUsageReportCacheStore: TokenUsageReportStoring, @unchecked Send
 
 struct TokenPricingCatalog: Sendable {
     struct Price: Sendable {
-        let inputPerMillion: Decimal
-        let cachedInputPerMillion: Decimal
-        let outputPerMillion: Decimal
+        var inputPerMillion: Decimal
+        var cachedInputPerMillion: Decimal
+        var outputPerMillion: Decimal
         let displayName: String
         var priorityMultiplier: Decimal = 1
         var fastCreditMultiplier: Decimal? = nil
@@ -349,7 +351,10 @@ struct TokenPricingCatalog: Sendable {
         }
     }
 
-    static let standard = TokenPricingCatalog(prices: [
+    /// Built-in table overlaid with the latest price feed; see `PriceFeed`.
+    static var standard: TokenPricingCatalog { PriceFeed.current }
+
+    static let builtIn = TokenPricingCatalog(prices: [
         "gpt-6.1-sol": Price(inputPerMillion: 2, cachedInputPerMillion: 0.1, outputPerMillion: 10, displayName: "GPT-6.1 Sol", priorityMultiplier: 2, fastCreditMultiplier: 2.5, longContext: true, ultrafastMultiplier: 6),
         "gpt-6.1-terra": Price(inputPerMillion: 1, cachedInputPerMillion: 0.05, outputPerMillion: 5, displayName: "GPT-6.1 Terra", priorityMultiplier: 2, fastCreditMultiplier: 2.5, longContext: true),
         "gpt-6-sol": Price(inputPerMillion: 2, cachedInputPerMillion: 0.2, outputPerMillion: 10, displayName: "GPT-6 Sol", priorityMultiplier: 2, fastCreditMultiplier: 2.5, longContext: true),
@@ -370,6 +375,8 @@ struct TokenPricingCatalog: Sendable {
         "gpt-5.3-codex": Price(inputPerMillion: 1.75, cachedInputPerMillion: 0.175, outputPerMillion: 14, displayName: "GPT-5.3 Codex", priorityMultiplier: 2),
         "gpt-5.2": Price(inputPerMillion: 1.75, cachedInputPerMillion: 0.175, outputPerMillion: 14, displayName: "GPT-5.2", priorityMultiplier: 2),
         "gpt-5.2-codex": Price(inputPerMillion: 1.75, cachedInputPerMillion: 0.175, outputPerMillion: 14, displayName: "GPT-5.2 Codex"),
+        "claude-fable-5-2": claudePrice("Claude Fable 5.2", "8", "40", "0.2", fast: true),
+        "claude-mythos-5-2": claudePrice("Claude Mythos 5.2", "8", "40", "0.2", fast: true),
         "claude-fable-5-1": claudePrice("Claude Fable 5.1", "10", "50", "0.25"),
         "claude-mythos-5-1": claudePrice("Claude Mythos 5.1", "10", "50", "0.25"),
         "claude-opus-5-5": claudePrice("Claude Opus 5.5", "4", "20", "0.2", fast: true),
@@ -424,6 +431,26 @@ struct TokenPricingCatalog: Sendable {
         self.prices = prices
         snapshotPrices = prices.map { ("\($0.key)-20", $0.value) }
             .sorted { $0.prefix.count > $1.prefix.count }
+    }
+
+    /// Feed rates correct known models within 5x of the built-in price, guarding against a bad upstream edit.
+    /// New models get base rates only; Fast mode stays unpriced and US residency uncharged until the built-in table learns them.
+    func overlaid(_ feed: [String: PriceFeed.Rates]) -> TokenPricingCatalog {
+        var merged = prices
+        for (id, rates) in feed {
+            if var known = prices[id] {
+                let pairs = [(rates.input, known.inputPerMillion), (rates.cachedInput, known.cachedInputPerMillion), (rates.output, known.outputPerMillion)]
+                guard pairs.allSatisfy({ $0.0 * 5 >= $0.1 && $0.0 <= $0.1 * 5 }) else { continue }
+                known.inputPerMillion = rates.input
+                known.cachedInputPerMillion = rates.cachedInput
+                known.outputPerMillion = rates.output
+                merged[id] = known
+            } else if price(for: id) == nil { // dated snapshots of known models keep the built-in rules
+                merged[id] = Price(inputPerMillion: rates.input, cachedInputPerMillion: rates.cachedInput, outputPerMillion: rates.output,
+                                   displayName: id, fastModeUnpriced: true)
+            }
+        }
+        return TokenPricingCatalog(prices: merged)
     }
 
     private static let write5Rate = Decimal(string: "1.25")!

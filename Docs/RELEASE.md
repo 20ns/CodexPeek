@@ -1,5 +1,14 @@
 # Release Notes
 
+## 1.0.14
+
+- Show Claude's separate per-model weekly limit (currently Fable) under the weekly window.
+
+## 1.0.13
+
+- Add Claude Fable 5.2 and Claude Mythos 5.2 prices, including Fast mode.
+- Fetch model prices daily from LiteLLM's public price list, so new Claude and GPT models are priced without an app update. The built-in table stays the fallback, and feed prices more than 5x off a known model's built-in price are ignored.
+
 ## 1.0.12
 
 - Price each Claude request once per scan and divide by a million with an exact exponent shift, cutting the 5-minute Claude scan from about 0.8 to 0.3 seconds with identical totals.

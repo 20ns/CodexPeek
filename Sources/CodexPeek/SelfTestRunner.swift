@@ -19,6 +19,7 @@ struct SelfTestRunner {
         try testClaudeCredentials()
         try testSessionIndexStore()
         try testClaudeCodeTokenHistory()
+        try testPriceFeed()
         try testLegacyClaudeBackfill()
         try testUsageComparisons()
         try testSubscriptionValue()
@@ -76,44 +77,44 @@ struct SelfTestRunner {
 
     private func testCurrentModelPricing() throws {
         let usage = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 1_000_000, reasoningOutputTokens: 0, totalTokens: 2_000_000)
-        let cost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-sol", usage: usage), "GPT-5.6 Sol pricing missing")
+        let cost = try unwrap(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-5.6-sol", usage: usage), "GPT-5.6 Sol pricing missing")
         try expect(cost.total == 24, "GPT-5.6 Sol pricing mismatch")
-        let priorityCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-sol", usage: usage, serviceTier: "priority"), "GPT-5.6 priority pricing missing")
+        let priorityCost = try unwrap(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-5.6-sol", usage: usage, serviceTier: "priority"), "GPT-5.6 priority pricing missing")
         try expect(priorityCost.total == 48, "GPT-5.6 priority pricing mismatch")
-        let gpt55PriorityCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.5", usage: usage, serviceTier: "priority"), "GPT-5.5 priority pricing missing")
+        let gpt55PriorityCost = try unwrap(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-5.5", usage: usage, serviceTier: "priority"), "GPT-5.5 priority pricing missing")
         try expect(gpt55PriorityCost.total == 87.5, "GPT-5.5 priority pricing mismatch")
-        try expect(TokenPricingCatalog.standard.fastCreditMultiplier(for: "gpt-5.6-sol") == 2.5, "GPT-5.6 Fast credit multiplier mismatch")
-        try expect(TokenPricingCatalog.standard.fastCreditMultiplier(for: "gpt-5.4") == 2, "GPT-5.4 Fast credit multiplier mismatch")
+        try expect(TokenPricingCatalog.builtIn.fastCreditMultiplier(for: "gpt-5.6-sol") == 2.5, "GPT-5.6 Fast credit multiplier mismatch")
+        try expect(TokenPricingCatalog.builtIn.fastCreditMultiplier(for: "gpt-5.4") == 2, "GPT-5.4 Fast credit multiplier mismatch")
         let cachedUsage = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 1_000_000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1_000_000)
-        try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-5.6-sol", usage: cachedUsage) == Decimal(string: "3.6"), "cache savings mismatch")
-        try expect(TokenPricingCatalog.standard.displayModelName(for: "gpt-5.6-terra-2026") == "GPT-5.6 Terra", "GPT-5.6 Terra prefix pricing missing")
-        let terraCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-terra", usage: usage), "GPT-5.6 Terra pricing missing")
+        try expect(TokenPricingCatalog.builtIn.estimateCacheSavings(for: "gpt-5.6-sol", usage: cachedUsage) == Decimal(string: "3.6"), "cache savings mismatch")
+        try expect(TokenPricingCatalog.builtIn.displayModelName(for: "gpt-5.6-terra-2026") == "GPT-5.6 Terra", "GPT-5.6 Terra prefix pricing missing")
+        let terraCost = try unwrap(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-5.6-terra", usage: usage), "GPT-5.6 Terra pricing missing")
         try expect(terraCost.total == 14, "GPT-5.6 Terra pricing mismatch")
-        let lunaCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-luna", usage: usage), "GPT-5.6 Luna pricing missing")
+        let lunaCost = try unwrap(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-5.6-luna", usage: usage), "GPT-5.6 Luna pricing missing")
         try expect(lunaCost.total == Decimal(1.4), "GPT-5.6 Luna pricing mismatch")
-        try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-5.6-luna", usage: cachedUsage) == Decimal(0.18), "GPT-5.6 Luna cache savings mismatch")
-        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.3-codex-spark", usage: usage) == nil, "unpriced variants should not inherit base pricing")
-        let astraCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-6-astra", usage: usage), "GPT-6 Astra pricing missing")
+        try expect(TokenPricingCatalog.builtIn.estimateCacheSavings(for: "gpt-5.6-luna", usage: cachedUsage) == Decimal(0.18), "GPT-5.6 Luna cache savings mismatch")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-5.3-codex-spark", usage: usage) == nil, "unpriced variants should not inherit base pricing")
+        let astraCost = try unwrap(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-6-astra", usage: usage), "GPT-6 Astra pricing missing")
         try expect(astraCost.total == 60, "GPT-6 Astra pricing mismatch")
-        let astraFastCost = try unwrap(TokenPricingCatalog.standard.estimateCost(for: "gpt-6-astra", usage: usage, serviceTier: "fast"), "GPT-6 Astra Fast pricing missing")
+        let astraFastCost = try unwrap(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-6-astra", usage: usage, serviceTier: "fast"), "GPT-6 Astra Fast pricing missing")
         try expect(astraFastCost.total == 120, "GPT-6 Astra Fast pricing mismatch")
-        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6-astra-2026", usage: usage)?.total == 60, "GPT-6 Astra snapshot pricing missing")
-        try expect(TokenPricingCatalog.standard.displayModelName(for: "gpt-6-astra") == "GPT-6 Astra", "GPT-6 Astra display name mismatch")
-        try expect(TokenPricingCatalog.standard.fastCreditMultiplier(for: "gpt-6-astra") == 2.5, "GPT-6 Astra Fast credit multiplier mismatch")
-        try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-6-astra", usage: cachedUsage) == 9, "GPT-6 Astra cache savings mismatch")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-6-astra-2026", usage: usage)?.total == 60, "GPT-6 Astra snapshot pricing missing")
+        try expect(TokenPricingCatalog.builtIn.displayModelName(for: "gpt-6-astra") == "GPT-6 Astra", "GPT-6 Astra display name mismatch")
+        try expect(TokenPricingCatalog.builtIn.fastCreditMultiplier(for: "gpt-6-astra") == 2.5, "GPT-6 Astra Fast credit multiplier mismatch")
+        try expect(TokenPricingCatalog.builtIn.estimateCacheSavings(for: "gpt-6-astra", usage: cachedUsage) == 9, "GPT-6 Astra cache savings mismatch")
         for (model, total) in [("gpt-6.1-sol", Decimal(12)), ("gpt-6-sol", Decimal(12)), ("gpt-6-luna", Decimal(string: "0.6")!), ("gpt-5.6-cyber", Decimal(string: "87.5")!), ("gpt-5.4-nano", Decimal(string: "1.45")!)] {
-            try expect(TokenPricingCatalog.standard.estimateCost(for: model, usage: usage)?.total == total, "new model pricing mismatch: \(model)")
-            try expect(TokenPricingCatalog.standard.estimateCost(for: model + "-2026-10-01", usage: usage)?.total == total, "snapshot pricing mismatch: \(model)")
+            try expect(TokenPricingCatalog.builtIn.estimateCost(for: model, usage: usage)?.total == total, "new model pricing mismatch: \(model)")
+            try expect(TokenPricingCatalog.builtIn.estimateCost(for: model + "-2026-10-01", usage: usage)?.total == total, "snapshot pricing mismatch: \(model)")
         }
-        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-sol", usage: cachedUsage)?.total == Decimal(string: "0.1"), "Sol 6.1 cached rate mismatch")
-        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-sol", usage: usage, serviceTier: "fast", isLongContext: true)?.total == 38, "long-context Fast pricing mismatch")
-        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6-astra", usage: usage, serviceTier: "ultrafast")?.total == 360, "Astra Ultrafast pricing mismatch")
-        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-sol", usage: usage, serviceTier: "ultrafast")?.total == 72, "Sol 6.1 Ultrafast pricing mismatch")
-        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-sol", usage: usage, serviceTier: "future-tier") == nil, "unknown tiers must not use standard prices")
-        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6-sol", usage: usage, serviceTier: "ultrafast") == nil, "unsupported tier should remain unpriced")
-        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-terra", usage: usage)?.total == 6, "Terra 6.1 pricing mismatch")
-        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.3-codex", usage: usage, serviceTier: "fast")?.total == Decimal(string: "31.5"), "GPT-5.3 Codex Fast pricing mismatch")
-        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-5.4-nano", usage: usage, serviceTier: "fast") == nil, "Nano has no Fast price")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-6.1-sol", usage: cachedUsage)?.total == Decimal(string: "0.1"), "Sol 6.1 cached rate mismatch")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-6.1-sol", usage: usage, serviceTier: "fast", isLongContext: true)?.total == 38, "long-context Fast pricing mismatch")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-6-astra", usage: usage, serviceTier: "ultrafast")?.total == 360, "Astra Ultrafast pricing mismatch")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-6.1-sol", usage: usage, serviceTier: "ultrafast")?.total == 72, "Sol 6.1 Ultrafast pricing mismatch")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-6.1-sol", usage: usage, serviceTier: "future-tier") == nil, "unknown tiers must not use standard prices")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-6-sol", usage: usage, serviceTier: "ultrafast") == nil, "unsupported tier should remain unpriced")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-6.1-terra", usage: usage)?.total == 6, "Terra 6.1 pricing mismatch")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-5.3-codex", usage: usage, serviceTier: "fast")?.total == Decimal(string: "31.5"), "GPT-5.3 Codex Fast pricing mismatch")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-5.4-nano", usage: usage, serviceTier: "fast") == nil, "Nano has no Fast price")
         try expect(UIFormatters.compactTokenString(2_106_400_000) == "2.1B", "billion token formatting mismatch")
     }
 
@@ -221,7 +222,7 @@ struct SelfTestRunner {
         try expect(decoded.cacheWriteInputTokens == 100_000, "cache writes must survive the session index")
         let delta = parsed.delta(since: .zero)
         try expect(delta?.cacheWriteInputTokens == 100_000, "cumulative-only rows must preserve cache writes")
-        try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-6.1-sol", usage: parsed, isLongContext: true) == Decimal(string: "0.28"), "cache savings must subtract the write premium")
+        try expect(TokenPricingCatalog.builtIn.estimateCacheSavings(for: "gpt-6.1-sol", usage: parsed, isLongContext: true) == Decimal(string: "0.28"), "cache savings must subtract the write premium")
         let daily = UsageHistoryAnalytics.dailyUsage(from: before.history!.buckets, days: 2)
         try expect(UsageHistoryAnalytics.modelTotals(from: daily).first?.cost == before.week.estimatedCostUSD, "history should use long-context prices")
         try FileManager.default.moveItem(at: active, to: archived.appendingPathComponent("rollout.jsonl"))
@@ -242,8 +243,8 @@ struct SelfTestRunner {
         var invalidWrites = parsed
         invalidWrites.cacheWriteInputTokens = Int.max
         try expect(!invalidWrites.isConsistent, "cache reads and writes must fit within input without overflow")
-        try expect(TokenPricingCatalog.standard.estimateCost(for: "gpt-6.1-sol", usage: invalidWrites) == nil, "inconsistent usage must not produce a cost")
-        try expect(TokenPricingCatalog.standard.estimateCacheSavings(for: "gpt-6.1-sol", usage: invalidWrites) == nil, "inconsistent usage must not produce savings")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gpt-6.1-sol", usage: invalidWrites) == nil, "inconsistent usage must not produce a cost")
+        try expect(TokenPricingCatalog.builtIn.estimateCacheSavings(for: "gpt-6.1-sol", usage: invalidWrites) == nil, "inconsistent usage must not produce savings")
         let overflowing = TokenUsagePayload(inputTokens: Int.max, cachedInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0, totalTokens: Int.max)
         try expect(!overflowing.isConsistent, "inconsistent counters should not overflow validation")
     }
@@ -376,6 +377,12 @@ struct SelfTestRunner {
         catch { missingBinaryRejected = true }
         let helperAfterFailure = try Data(contentsOf: helper)
         try expect(missingBinaryRejected && helperAfterFailure == updatedScript, "failed helper updates retain the working executable")
+        let upgradedScript = Data("#!/bin/sh\n# upgraded\ncat >/dev/null\n".utf8)
+        try upgradedScript.write(to: binary)
+        ClaudeCodeStatusLine.updateHelperIfInstalled(executableURL: binary, configDirectory: config)
+        let upgradedHelper = try Data(contentsOf: helper)
+        let commandAfterUpgrade = try command(at: settingsURL)
+        try expect(upgradedHelper == upgradedScript && commandAfterUpgrade == installedCommand, "launch refreshes an outdated helper only")
         let freshConfig = root.appendingPathComponent("Fresh Dir")
         try FileManager.default.createDirectory(at: freshConfig, withIntermediateDirectories: true)
         try ClaudeCodeStatusLine.install(executableURL: binary, configDirectory: freshConfig)
@@ -469,8 +476,17 @@ struct SelfTestRunner {
         let snapshot = try unwrap(ClaudeCodeStatusLine.captureOAuth(Data(live.utf8), at: cache, now: now), "oauth usage")
         try expect(snapshot.fiveHour?.usedPercent == 5 && snapshot.fiveHour?.windowDurationMins == 300 && snapshot.fiveHour?.resetsAt == Formatters.parseISO8601(fiveReset), "oauth 5h")
         try expect(snapshot.sevenDay?.usedPercent == 38 && snapshot.sevenDay?.windowDurationMins == 10080 && snapshot.sevenDay?.resetsAt == Formatters.parseISO8601(weekReset), "oauth 7d")
+        try expect(snapshot.modelWeekly == nil, "no scoped limit, no model row")
+        let scoped = #"{"five_hour":{"utilization":5,"resets_at":"\#(fiveReset)"},"seven_day":{"utilization":38,"resets_at":"\#(weekReset)"},"limits":[{"kind":"weekly_all","percent":38},{"kind":"weekly_scoped","percent":5,"resets_at":"\#(weekReset)","scope":{"model":{"display_name":"Fable","id":null},"surface":null}}]}"#
+        let fable = try unwrap(ClaudeCodeStatusLine.captureOAuth(Data(scoped.utf8), at: cache, now: now), "oauth scoped usage")
+        try expect(fable.modelWeeklyName == "Fable" && fable.modelWeekly?.usedPercent == 5 && fable.modelWeekly?.resetsAt == Formatters.parseISO8601(weekReset), "oauth Fable weekly")
+        let statusline = try unwrap(ClaudeCodeStatusLine.capture(Data(#"{"rate_limits":{"five_hour":{"used_percentage":7}}}"#.utf8), at: cache, now: now), "statusline after oauth")
+        try expect(statusline.fiveHour?.usedPercent == 7 && statusline.modelWeekly?.usedPercent == 5, "statusline keeps the Fable reading")
+        let odd = try unwrap(ClaudeCodeStatusLine.captureOAuth(Data(#"{"five_hour":{"utilization":5},"limits":[{"kind":"weekly_scoped","percent":"x","scope":{"model":{"display_name":"Fable"}}}]}"#.utf8), at: cache, now: now), "odd scoped shape")
+        try expect(odd.fiveHour?.usedPercent == 5 && odd.modelWeekly == nil, "odd scoped shape hides the row, keeps the reading")
+        _ = try ClaudeCodeStatusLine.captureOAuth(Data(live.utf8), at: cache, now: now)
         let raw = String(decoding: try Data(contentsOf: cache), as: UTF8.self)
-        try expect(!raw.contains("utilization") && !raw.contains("extra_usage"), "cache stays quota-only")
+        try expect(!raw.contains("utilization") && !raw.contains("extra_usage") && !raw.contains("Fable"), "cache stays quota-only and drops a vanished cap")
         let kept = try Data(contentsOf: cache)
         let absent = try ClaudeCodeStatusLine.captureOAuth(Data(#"{"five_hour":{"utilization":null,"resets_at":"\#(fiveReset)"},"seven_day":{"utilization":"","resets_at":""}}"#.utf8), at: cache, now: now)
         let afterAbsent = try Data(contentsOf: cache)
@@ -549,10 +565,12 @@ struct SelfTestRunner {
     }
 
     private func testClaudeCodeTokenHistory() throws {
-        let catalog = TokenPricingCatalog.standard
+        let catalog = TokenPricingCatalog.builtIn
         let paired = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 1_000_000, reasoningOutputTokens: 0, totalTokens: 2_000_000)
         let cachedOnly = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 1_000_000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1_000_000)
         let published: [(String, String, String)] = [
+            ("claude-fable-5-2", "48", "0.2"),
+            ("claude-mythos-5-2", "48", "0.2"),
             ("claude-fable-5-1", "60", "0.25"),
             ("claude-mythos-5-1", "60", "0.25"),
             ("claude-opus-5-5", "24", "0.2"),
@@ -582,7 +600,7 @@ struct SelfTestRunner {
         try expect(catalog.estimateCost(for: "claude-sonnet-4-6-latest", usage: paired) == nil, "aliases should stay unpriced")
         try expect(catalog.estimateCost(for: "claude-3-5-haiku-20241022", usage: paired) == nil, "legacy ids should stay unpriced")
         try expect(catalog.estimateCost(for: "gpt-5.6-sol", usage: paired, inferenceGeo: "us")?.total == 24, "OpenAI prices should ignore US inference")
-        for model in ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"] {
+        for model in ["claude-fable-5-2", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"] {
             let standardCost = try unwrap(catalog.estimateCost(for: model, usage: paired), "Claude price missing: \(model)")
             try expect(catalog.estimateCost(for: model, usage: paired, serviceTier: "fast")?.total == standardCost.total * 2, "Claude Fast mismatch: \(model)")
         }
@@ -771,6 +789,33 @@ struct SelfTestRunner {
         throw CodexUsageError.invalidResponse("unreadable Claude logs should throw")
     }
 
+    private func testPriceFeed() throws {
+        let feed = """
+        {"claude-opus-5-5": {"litellm_provider": "anthropic", "mode": "chat", "input_cost_per_token": 3e-06, "output_cost_per_token": 1.5e-05, "cache_read_input_token_cost": 1.5e-07},
+         "claude-sonnet-5-5": {"mode": "chat", "litellm_provider": "anthropic", "input_cost_per_token": 2e-04, "output_cost_per_token": 1e-03},
+         "claude-fable-9": {"mode": "chat", "litellm_provider": "anthropic", "input_cost_per_token": 8e-06, "output_cost_per_token": 4e-05, "cache_read_input_token_cost": 2e-07},
+         "claude-opus-4-5-20251101": {"mode": "chat", "litellm_provider": "anthropic", "input_cost_per_token": 5e-06, "output_cost_per_token": 2.5e-05},
+         "gpt-7": {"mode": "chat", "litellm_provider": "openai", "input_cost_per_token": 1e-06, "output_cost_per_token": 5e-06},
+         "bedrock/claude-opus-5-5": {"mode": "chat", "litellm_provider": "bedrock", "input_cost_per_token": 1e-06, "output_cost_per_token": 1e-06},
+         "gpt-image-9": {"mode": "image_generation", "litellm_provider": "openai", "input_cost_per_token": 1e-06, "output_cost_per_token": 5e-06},
+         "sample_spec": {"input_cost_per_token": 0}}
+        """
+        let rates = try unwrap(PriceFeed.parse(Data(feed.utf8)), "price feed should parse")
+        try expect(rates["claude-fable-9"] == PriceFeed.Rates(input: 8, cachedInput: Decimal(string: "0.2")!, output: 40), "feed rates should convert exactly")
+        try expect(rates["gpt-7"]?.cachedInput == 1, "missing cache price falls back to input")
+        try expect(rates["bedrock/claude-opus-5-5"] == nil && rates["gpt-image-9"] == nil && rates["sample_spec"] == nil, "only first-party text models")
+        let catalog = TokenPricingCatalog.builtIn.overlaid(rates)
+        let paired = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 1_000_000, reasoningOutputTokens: 0, totalTokens: 2_000_000)
+        try expect(catalog.estimateCost(for: "claude-opus-5-5", usage: paired)?.total == 18, "feed should update known prices")
+        try expect(catalog.estimateCost(for: "claude-opus-5-5", usage: paired, serviceTier: "fast")?.total == 36, "known models keep their Fast rules")
+        try expect(catalog.estimateCost(for: "claude-sonnet-5-5", usage: paired)?.total == 12, "absurd feed prices are ignored")
+        try expect(catalog.estimateCost(for: "claude-fable-9-20270101", usage: paired)?.total == 48, "feed should price new models and their snapshots")
+        try expect(catalog.estimateCost(for: "claude-fable-9", usage: paired, serviceTier: "fast") == nil, "new models leave Fast unpriced")
+        try expect(catalog.estimateCost(for: "claude-fable-9", usage: paired, inferenceGeo: "us")?.total == 48, "new models skip the US premium")
+        try expect(catalog.displayModelName(for: "claude-opus-4-5-20251101") == "Claude Opus 4.5", "dated feed ids keep built-in rules")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "claude-fable-9", usage: paired) == nil, "built-in table stays untouched")
+    }
+
     private func testLegacyClaudeBackfill() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -914,7 +959,7 @@ struct SelfTestRunner {
 
         // Plus $20 × 7/30; three million-token Sol requests plus Luna.
         let lunaCost = try unwrap(
-            TokenPricingCatalog.standard.estimateCost(for: "gpt-5.6-luna", usage: light)?.total,
+            TokenPricingCatalog.builtIn.estimateCost(for: "gpt-5.6-luna", usage: light)?.total,
             "luna cost missing"
         )
         let expectedSpend = Decimal(72) + lunaCost

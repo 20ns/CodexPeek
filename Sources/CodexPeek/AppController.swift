@@ -35,6 +35,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private let claudeSectionView = MenuSectionHeaderView()
     private let claudeFiveHourView = ClaudeUsageMenuItemView()
     private let claudeWeeklyView = ClaudeUsageMenuItemView()
+    private let claudeModelWeeklyView = ClaudeUsageMenuItemView()
     private let claudeTokenCostView = TokenCostMenuItemView()
     private let claudeStatusView = StatusMenuItemView()
 
@@ -47,6 +48,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private let claudeSectionItem = NSMenuItem()
     private let claudeFiveHourItem = NSMenuItem()
     private let claudeWeeklyItem = NSMenuItem()
+    private let claudeModelWeeklyItem = NSMenuItem()
     private let claudeTokenCostItem = NSMenuItem()
     private let claudeStatusItem = NSMenuItem()
     private let enableClaudeItem = NSMenuItem(title: "Enable Claude local usage", action: #selector(enableClaudeLocalUsage), keyEquivalent: "")
@@ -132,6 +134,16 @@ final class AppController: NSObject, NSMenuDelegate {
         }
 
         render()
+
+        if let executableURL = Bundle.main.executableURL {
+            Task.detached(priority: .utility) { ClaudeCodeStatusLine.updateHelperIfInstalled(executableURL: executableURL) }
+        }
+        Task.detached(priority: .utility) {
+            while !Task.isCancelled {
+                await PriceFeed.refreshIfStale()
+                try? await Task.sleep(for: .seconds(60 * 60))
+            }
+        }
 
         Task { [weak self] in
             guard let self else {
@@ -465,6 +477,7 @@ final class AppController: NSObject, NSMenuDelegate {
         claudeSectionItem.view = claudeSectionView
         claudeFiveHourItem.view = claudeFiveHourView
         claudeWeeklyItem.view = claudeWeeklyView
+        claudeModelWeeklyItem.view = claudeModelWeeklyView
         claudeTokenCostItem.view = claudeTokenCostView
         claudeStatusItem.view = claudeStatusView
         accountsItem.submenu = accountsMenu
@@ -502,7 +515,7 @@ final class AppController: NSObject, NSMenuDelegate {
     /// The primary provider's section leads the menu.
     private func layoutMenu() {
         let codex = [headerItem, codexHeaderSeparator, primaryUsageItem, secondaryUsageItem, sparkUsageItem, tokenCostItem, statusItemView]
-        let claude = [claudeSectionItem, claudeFiveHourItem, claudeWeeklyItem, claudeTokenCostItem, claudeStatusItem, enableClaudeItem]
+        let claude = [claudeSectionItem, claudeFiveHourItem, claudeWeeklyItem, claudeModelWeeklyItem, claudeTokenCostItem, claudeStatusItem, enableClaudeItem]
         let sections = primaryProvider == .codex ? codex + [sectionSeparator] + claude : claude + [sectionSeparator] + codex
         menu.items = sections + [
             .separator(), historyItem, providersItem, accountsItem,
@@ -749,6 +762,7 @@ final class AppController: NSObject, NSMenuDelegate {
                 title: UIFormatters.rateLimitWindowTitle(for: claudeSnapshot?.sevenDay, fallback: "Weekly window"),
                 window: claudeSnapshot?.sevenDay
             )
+            claudeModelWeeklyView.update(title: "\(claudeSnapshot?.modelWeeklyName ?? "Model") weekly", window: claudeSnapshot?.modelWeekly)
         }
         claudeStatusView.update(message: claudeStatusMessage())
         // Whichever section leads the menu carries the refresh button; Codex's header has its own.
@@ -769,6 +783,7 @@ final class AppController: NSObject, NSMenuDelegate {
         }
         claudeFiveHourItem.isHidden = !claudeEnabled || claudeSnapshot?.fiveHour == nil
         claudeWeeklyItem.isHidden = !claudeEnabled || claudeSnapshot?.sevenDay == nil
+        claudeModelWeeklyItem.isHidden = !claudeEnabled || claudeSnapshot?.modelWeekly == nil
         enableClaudeItem.isHidden = !claudeEnabled || (claudeBridgeEnabled && claudeUsageError == nil)
         codexHeaderSeparator.isHidden = !codexEnabled
         sectionSeparator.isHidden = !codexEnabled || !claudeEnabled
@@ -1316,6 +1331,7 @@ final class AppController: NSObject, NSMenuDelegate {
             "Last updated: \(updatedAt)",
             "Claude 5h usage: \(claudeSnapshot?.fiveHour.map { "\($0.usedPercent)%" } ?? "unavailable")",
             "Claude weekly usage: \(claudeSnapshot?.sevenDay.map { "\($0.usedPercent)%" } ?? "unavailable")",
+            "Claude \(claudeSnapshot?.modelWeeklyName ?? "model") weekly usage: \(claudeSnapshot?.modelWeekly.map { "\($0.usedPercent)%" } ?? "unavailable")",
             "Claude local bridge: \(claudeBridgeEnabled ? "enabled" : "disabled")",
             "Claude stale: \(claudeSnapshot?.isStale == true ? "yes" : "no")",
             "Claude updated: \(claudeSnapshot.map { UIFormatters.usageUpdatedString(from: $0.updatedAt) } ?? "never")"
@@ -1344,6 +1360,7 @@ final class AppController: NSObject, NSMenuDelegate {
             let now = Date()
             if (claudeSnapshot?.fiveHour?.resetsAt ?? .distantFuture) <= now { claudeSnapshot?.fiveHour = nil }
             if (claudeSnapshot?.sevenDay?.resetsAt ?? .distantFuture) <= now { claudeSnapshot?.sevenDay = nil }
+            if (claudeSnapshot?.modelWeekly?.resetsAt ?? .distantFuture) <= now { claudeSnapshot?.modelWeekly = nil }
             claudeUsageError = "Could not read local Claude usage"
         }
         render()

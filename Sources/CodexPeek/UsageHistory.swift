@@ -215,10 +215,11 @@ enum UsageHistoryAnalytics {
         var priorityTokens: [Date: [String: Int]] = [:]
         var fastTokens: [Date: [String: Int]] = [:]
 
+        let catalog = TokenPricingCatalog.standard
         for bucket in buckets where bucket.startedAt >= firstDay && bucket.startedAt <= now {
             let day = calendar.startOfDay(for: bucket.startedAt)
             totals[day, default: [:]][bucket.model, default: .zero].add(bucket.usage)
-            if let cost = TokenPricingCatalog.standard.estimateCost(
+            if let cost = catalog.estimateCost(
                 for: bucket.model,
                 usage: bucket.usage,
                 serviceTier: bucket.serviceTier,
@@ -229,7 +230,7 @@ enum UsageHistoryAnalytics {
             } else {
                 unpriced[day, default: []].insert(bucket.model)
             }
-            savings[day, default: 0] += TokenPricingCatalog.standard.estimateCacheSavings(
+            savings[day, default: 0] += catalog.estimateCacheSavings(
                 for: bucket.model,
                 usage: bucket.usage,
                 serviceTier: bucket.serviceTier,
@@ -463,11 +464,12 @@ enum UsageHistoryAnalytics {
             }
         }
 
+        let catalog = TokenPricingCatalog.standard
         for bucket in buckets where bucket.startedAt >= firstDay && bucket.startedAt <= now {
             if bucket.usesChatGPTCredits == true {
                 creditTokens += bucket.usage.totalTokens
             }
-            if let cost = TokenPricingCatalog.standard.estimateCost(
+            if let cost = catalog.estimateCost(
                 for: bucket.model,
                 usage: bucket.usage,
                 serviceTier: bucket.serviceTier,

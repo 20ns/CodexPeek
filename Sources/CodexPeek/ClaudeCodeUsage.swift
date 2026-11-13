@@ -3,6 +3,9 @@ import Foundation
 struct ClaudeCodeUsageSnapshot: Codable, Equatable, Sendable {
     var fiveHour: RateLimitWindowSnapshot?
     var sevenDay: RateLimitWindowSnapshot?
+    /// A per-model weekly cap such as Fable's, only reported by the OAuth endpoint.
+    var modelWeekly: RateLimitWindowSnapshot? = nil
+    var modelWeeklyName: String? = nil
     var updatedAt: Date
     var isStale: Bool
 }
@@ -22,7 +25,9 @@ enum ClaudeCodeStatusLine {
 
     static func capture(_ data: Data, at url: URL = cacheURL, now: Date = Date()) throws -> ClaudeCodeUsageSnapshot? {
         guard let incoming = try incomingWindows(data) else { return nil }
-        let stored = Cache(updatedAt: now, fiveHour: incoming.fiveHour, sevenDay: incoming.sevenDay)
+        var stored = Cache(updatedAt: now, fiveHour: incoming.fiveHour, sevenDay: incoming.sevenDay, modelWeekly: incoming.modelWeekly)
+        // The statusline never carries the model cap, so keep the last OAuth reading instead of erasing it.
+        if !incoming.reportsModelWeekly { stored.modelWeekly = (try? readCache(url))?.modelWeekly }
         try writeCache(stored, to: url)
         return snapshot(stored, now: now)
     }
@@ -62,6 +67,16 @@ enum ClaudeCodeStatusLine {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: settingsURL.path)
     }
 
+    /// The statusline runs a private copy of the app, so refresh it after an upgrade; an old copy
+    /// would rewrite the cache without fields it doesn't know, such as the model weekly cap.
+    static func updateHelperIfInstalled(executableURL: URL, configDirectory: URL = defaultConfigDirectory) {
+        let helperURL = configDirectory.appendingPathComponent(helperName)
+        guard (try? isInstalled(configDirectory: configDirectory)) == true,
+              let fresh = try? Data(contentsOf: executableURL),
+              (try? Data(contentsOf: helperURL)) != fresh else { return }
+        try? installHelper(from: executableURL, to: helperURL)
+    }
+
     static func isInstalled(configDirectory: URL = defaultConfigDirectory) throws -> Bool {
         let helperURL = configDirectory.appendingPathComponent(helperName)
         guard let command = try readSettings(configDirectory.appendingPathComponent("settings.json")).command else {
@@ -75,16 +90,20 @@ enum ClaudeCodeStatusLine {
         var updatedAt: Date
         var fiveHour: Window?
         var sevenDay: Window?
+        var modelWeekly: Window? = nil
         struct Window: Codable {
             var usedPercent: Int
             var windowDurationMins: Int
             var resetsAt: Date?
+            var name: String? = nil
         }
     }
 
     private struct Incoming {
         var fiveHour: Cache.Window?
         var sevenDay: Cache.Window?
+        var modelWeekly: Cache.Window?
+        var reportsModelWeekly = false
     }
 
     private struct SettingsFile {
@@ -113,7 +132,23 @@ enum ClaudeCodeStatusLine {
         for key in ["five_hour", "seven_day"] {
             if let window = try canonicalWindow(root[key]) { limits[key] = window }
         }
+        limits["model_weekly"] = modelWeeklyWindow(root["limits"]) ?? NSNull()
         do { return try JSONSerialization.data(withJSONObject: ["rate_limits": limits]) } catch { throw Failure.rejected }
+    }
+
+    /// Undocumented `limits` entry (`kind: weekly_scoped`) for a per-model weekly cap. Read leniently:
+    /// a shape change hides the row instead of rejecting the whole reading.
+    private static func modelWeeklyWindow(_ raw: Any?) -> [String: Any]? {
+        for limit in raw as? [[String: Any]] ?? [] where limit["kind"] as? String == "weekly_scoped" {
+            let model = (limit["scope"] as? [String: Any])?["model"] as? [String: Any]
+            guard let name = (model?["display_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  (1...24).contains(name.count),
+                  var window = try? canonicalWindow(["utilization": limit["percent"] ?? NSNull(), "resets_at": limit["resets_at"] ?? NSNull()])
+            else { continue }
+            window["name"] = name
+            return window
+        }
+        return nil
     }
 
     /// Missing, null, or blank utilization stays absent so capture does not turn it into 0.
@@ -151,6 +186,13 @@ enum ClaudeCodeStatusLine {
         var incoming = Incoming()
         incoming.fiveHour = try window(limits["five_hour"], minutes: 300)
         incoming.sevenDay = try window(limits["seven_day"], minutes: 10080)
+        if let raw = limits["model_weekly"] {
+            incoming.reportsModelWeekly = true
+            if let name = (raw as? [String: Any])?["name"] as? String {
+                incoming.modelWeekly = try? window(raw, minutes: 10080)
+                incoming.modelWeekly?.name = name
+            }
+        }
         return (incoming.fiveHour == nil && incoming.sevenDay == nil) ? nil : incoming
     }
 
@@ -191,7 +233,7 @@ enum ClaudeCodeStatusLine {
         let cache: Cache
         do { cache = try decoder.decode(Cache.self, from: Data(contentsOf: url)) } catch { throw Failure.rejected }
         _ = try epoch(cache.updatedAt.timeIntervalSince1970)
-        for (window, minutes) in [(cache.fiveHour, 300), (cache.sevenDay, 10080)] {
+        for (window, minutes) in [(cache.fiveHour, 300), (cache.sevenDay, 10080), (cache.modelWeekly, 10080)] {
             guard let window else { continue }
             guard (0...100).contains(window.usedPercent), window.windowDurationMins == minutes else { throw Failure.rejected }
             _ = try epoch(window.resetsAt?.timeIntervalSince1970)
@@ -217,6 +259,8 @@ enum ClaudeCodeStatusLine {
         return ClaudeCodeUsageSnapshot(
             fiveHour: five,
             sevenDay: seven,
+            modelWeekly: live(cache.modelWeekly),
+            modelWeeklyName: cache.modelWeekly?.name,
             updatedAt: cache.updatedAt,
             isStale: !(0..<staleAfter).contains(now.timeIntervalSince(cache.updatedAt))
         )

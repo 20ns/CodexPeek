@@ -3,18 +3,19 @@ import Foundation
 final class ClaudeCodeTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     private let projectsRootURL: URL
     private let fileManager: FileManager
-    private let pricingCatalog: TokenPricingCatalog
+    private let pinnedCatalog: TokenPricingCatalog?
+    private var pricingCatalog: TokenPricingCatalog { pinnedCatalog ?? .standard }
     private let indexStore: TokenUsageSessionIndexStoring?
 
     init(
         projectsRootURL: URL = ClaudeCodeTokenUsageSource.defaultProjectsRoot(),
         fileManager: FileManager = .default,
-        pricingCatalog: TokenPricingCatalog = .standard,
+        pricingCatalog: TokenPricingCatalog? = nil,
         indexStore: TokenUsageSessionIndexStoring? = nil
     ) {
         self.projectsRootURL = projectsRootURL
         self.fileManager = fileManager
-        self.pricingCatalog = pricingCatalog
+        pinnedCatalog = pricingCatalog
         self.indexStore = indexStore
     }
 
@@ -32,6 +33,7 @@ final class ClaudeCodeTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     }
 
     func usageReport() throws -> TokenUsageReport {
+        let pricingCatalog = pricingCatalog // one catalog for the whole pricing pass
         let now = Date()
         let weekCutoff = now.addingTimeInterval(-7 * 24 * 60 * 60)
         let monthCutoff = now.addingTimeInterval(-30 * 24 * 60 * 60)
