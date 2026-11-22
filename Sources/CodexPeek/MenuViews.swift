@@ -245,7 +245,7 @@ struct UsagePopoverView: View {
     private func tabIndicator(for provider: PopoverProvider) -> some View {
         switch provider {
         case .codex:
-            if let pct = vm.codexSnapshot?.sessionWindow?.usedPercent ?? vm.codexSnapshot?.weeklyWindow?.usedPercent {
+            if let pct = vm.codexSnapshot?.weeklyWindow?.usedPercent ?? vm.codexSnapshot?.sessionWindow?.usedPercent {
                 Text("\(pct)%")
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
                     .foregroundStyle(pct >= 90 || vm.codexSnapshot?.isWeeklyExhausted == true ? Color.red : Color.secondary)
@@ -255,13 +255,13 @@ struct UsagePopoverView: View {
         case .claude:
             if vm.claudeUsageError != nil {
                 Circle().fill(Color.orange).frame(width: 5, height: 5)
-            } else if let pct = vm.claudeSnapshot?.fiveHour?.usedPercent ?? vm.claudeSnapshot?.sevenDay?.usedPercent {
+            } else if let pct = vm.claudeSnapshot?.sevenDay?.usedPercent ?? vm.claudeSnapshot?.fiveHour?.usedPercent {
                 Text("\(pct)%")
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
                     .foregroundStyle(pct >= 90 ? Color.red : Color.secondary)
             }
         case .antigravity:
-            if let pct = vm.agySnapshot?.primaryBucket?.window.usedPercent {
+            if let pct = (vm.agySnapshot?.secondaryBucket ?? vm.agySnapshot?.primaryBucket)?.window.usedPercent {
                 Text("\(pct)%")
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
                     .foregroundStyle(pct >= 90 ? Color.red : Color.secondary)
@@ -391,7 +391,7 @@ struct UsagePopoverView: View {
         let report = vm.agyTokenReport
         let badge: StatusBadge? = {
             if let err = vm.agyUsageError, !err.isEmpty {
-                return StatusBadge(text: "Check bridge", kind: .warning)
+                return StatusBadge(text: "Check agy", kind: .warning)
             }
             if let p = snap?.primaryBucket?.window.usedPercent, p >= 90 {
                 return StatusBadge(text: "Near limit", kind: .critical)
@@ -416,8 +416,9 @@ struct UsagePopoverView: View {
                     Text("Antigravity")
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(.primary)
-                    if let top = shares.first {
-                        Text("\(top.modelName) \(top.sharePercent)%")
+                    // Argon's own weekly limit, like Claude's per-model Fable limit (not the 7d model share).
+                    if let argon = snap?.activeBuckets.first(where: { $0.id.contains("argon") }) {
+                        Text("Argon \(argon.window.usedPercent)%")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)

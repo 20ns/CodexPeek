@@ -1,5 +1,10 @@
 # Release Notes
 
+## 1.0.16
+
+- Show weekly usage in the top tabs instead of the 5-hour window.
+- Show Antigravity's separate Gemini Argon weekly limit next to its name in All, matching Claude's Fable limit, instead of the 7-day model share.
+
 ## 1.0.15
 
 - Read Antigravity quota from the `agy` CLI's `/usage` command on every refresh, so it stays current when you use AGY through ACP or the app instead of the CLI. Drop the statusline bridge setup it no longer needs.
