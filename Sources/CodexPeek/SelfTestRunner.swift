@@ -35,6 +35,7 @@ struct SelfTestRunner {
         try testRateLimitBucketClassifier()
         try await testMockClientIntegration()
         try await testCodexLaunch()
+        try await testAntigravityUsage()
         print("All self-tests passed.")
     }
 
@@ -1837,6 +1838,86 @@ struct SelfTestRunner {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+
+    private func testAntigravityUsage() async throws {
+        // Exact AGY built-in model pricing & effort suffix normalization
+        let cached1M = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 1_000_000, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 1_000_000)
+        let std1M = TokenUsagePayload(inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 1_000_000, reasoningOutputTokens: 0, totalTokens: 2_000_000)
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gemini-4-neon-high", usage: std1M)?.total == Decimal(18), "Gemini 4 Neon standard pricing should be $3+$15=$18")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gemini-4-neon-low", usage: cached1M)?.total == Decimal(string: "0.15"), "Gemini 4 Neon cached rate should be $0.15/M")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gemini-4-hydrogen-high", usage: std1M)?.total == Decimal(9), "Gemini 4 Hydrogen standard pricing should be $1.5+$7.5=$9")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gemini-4-hydrogen-xhigh", usage: cached1M)?.total == Decimal(string: "0.075"), "Gemini 4 Hydrogen cached rate should be $0.075/M")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gemini-4-argon", usage: std1M)?.total == Decimal(12), "Gemini 4 Argon standard pricing should be $12")
+        try expect(TokenPricingCatalog.builtIn.estimateCost(for: "gemini-3.8-flash-high", usage: std1M)?.total == Decimal(string: "4.5"), "Gemini 3.8 Flash standard pricing should be $4.50")
+        try expect(TokenPricingCatalog.builtIn.displayModelName(for: "gemini-4-neon-high") == "Gemini 4 Neon", "Effort suffix should normalize cleanly")
+        try expect(TokenPricingCatalog.humanDisplayName(for: "gpt-6.2-sol") == "GPT-6.2 Sol", "Feed model slug should format cleanly")
+
+        // LiteLLM PriceFeed strips leading "gemini/" prefix for Gemini 4 models
+        let feedJSON = Data(#"""
+        {
+          "gemini/gemini-4-neon": {
+            "litellm_provider": "gemini",
+            "mode": "chat",
+            "input_cost_per_token": 0.000003,
+            "cache_read_input_token_cost": 0.00000015,
+            "output_cost_per_token": 0.000015
+          }
+        }
+        """#.utf8)
+        let feedRates = try unwrap(PriceFeed.parse(feedJSON), "PriceFeed should parse gemini/ prefixed entries")
+        try expect(feedRates["gemini-4-neon"]?.input == Decimal(3), "PriceFeed gemini/ prefix stripping failed")
+
+        // Official Antigravity statusline quota capture
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("agy-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let statuslinePayload = Data(#"""
+        {
+          "product": "antigravity",
+          "plan_tier": "Pro",
+          "quota": {
+            "gemini-5h": {"remaining_fraction": 0.72, "reset_in_seconds": 7200},
+            "gemini-weekly": {"remaining_fraction": 0.9378, "reset_time": "2027-01-22T07:50:32Z", "reset_in_seconds": 560580}
+          }
+        }
+        """#.utf8)
+        let cacheFile = tempRoot.appendingPathComponent("agy-usage.json")
+        let captured = try unwrap(try AntigravityStatusLine.capture(statuslinePayload, at: cacheFile, now: now), "AGY statusline should capture quota")
+        try expect(captured.planTier == "Pro", "AGY plan tier mismatch")
+        try expect(captured.primaryBucket?.id == "gemini-5h" && captured.primaryBucket?.window.usedPercent == 28, "AGY 5h quota mismatch")
+        try expect(captured.secondaryBucket?.id == "gemini-weekly" && captured.secondaryBucket?.window.usedPercent == 6, "AGY weekly quota mismatch")
+
+        // Antigravity transcript scanning: separate uncached input + cache_read_tokens + deduplication across roots + model shares
+        let rootA = tempRoot.appendingPathComponent("brainA", isDirectory: true)
+        let rootB = tempRoot.appendingPathComponent("brainB", isDirectory: true)
+        let logsA = rootA.appendingPathComponent("conv-1/.system_generated/logs", isDirectory: true)
+        let logsB = rootB.appendingPathComponent("conv-1/.system_generated/logs", isDirectory: true)
+        try FileManager.default.createDirectory(at: logsA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: logsB, withIntermediateDirectories: true)
+
+        let isoNow = ISO8601DateFormatter().string(from: Date())
+        let transcript = """
+        {"step_index":0,"type":"USER_INPUT","created_at":"\(isoNow)","content":"hi"}
+        {"step_index":1,"type":"PLANNER_RESPONSE","created_at":"\(isoNow)","model":"gemini-4-neon-high","input_tokens":100000,"cache_read_tokens":200000,"output_tokens":10000}
+        {"step_index":2,"type":"PLANNER_RESPONSE","created_at":"\(isoNow)","model":"gemini-4-hydrogen-high","input_tokens":50000,"cache_read_tokens":0,"output_tokens":10000}
+        """
+        try Data(transcript.utf8).write(to: logsA.appendingPathComponent("transcript.jsonl"))
+        try Data(transcript.utf8).write(to: logsB.appendingPathComponent("transcript.jsonl"))
+
+        let report = try AntigravityTokenUsageSource(brainRoots: [rootA, rootB], pricingCatalog: .builtIn).usageReport()
+        try expect(report.week.inputTokens == 350_000, "AGY total input should sum uncached + cache_read and dedupe mirrored roots")
+        try expect(report.week.cachedInputTokens == 200_000, "AGY cached input mismatch")
+        try expect(report.week.outputTokens == 20_000, "AGY output tokens mismatch")
+        try expect(report.allTime.sessionCount == 1, "Mirrored conversation ID should count as 1 session")
+        // Neon: 100k*$3/M=$0.30 + 200k*$0.15/M=$0.03 + 10k*$15/M=$0.15 => $0.48
+        // Hydrogen: 50k*$1.5/M=$0.075 + 10k*$7.5/M=$0.075 => $0.15
+        // Total: $0.63
+        try expect(report.week.estimatedCostUSD == Decimal(string: "0.63"), "AGY exact cost mismatch")
+        let shares = AntigravityTokenUsageSource.modelShares(from: report, catalog: .builtIn)
+        try expect(shares.count == 2 && shares[0].modelName == "Gemini 4 Neon" && shares[0].sharePercent == 76, "AGY model share percentage mismatch")
     }
 }
 

@@ -1,0 +1,1388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CodexPeek Menu Bar Redesign Mock</title>
+<style>
+  :root {
+    --font-ui: var(--font-sans, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif);
+    --ui-fg: var(--foreground, #18181b);
+    --ui-muted: var(--muted-foreground, #52555f);
+    --ui-border: var(--border, rgba(0, 0, 0, 0.12));
+    --ui-card: var(--card, rgba(0, 0, 0, 0.04));
+
+    /* Provider accents — distinct hue & luminance across all 3 */
+    --codex: #3b82f6;
+    --codex-soft: rgba(59, 130, 246, 0.15);
+    --claude: #f97316;
+    --claude-soft: rgba(249, 115, 22, 0.15);
+    --gemini: #8b7cff;
+    --gemini-soft: rgba(139, 124, 255, 0.16);
+
+    --crit: #ef4444;
+    --warn: #f59e0b;
+    --ok: #22c55e;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ui-fg: var(--foreground, #f2f3f5);
+      --ui-muted: var(--muted-foreground, #a5aab5);
+      --ui-border: var(--border, rgba(255, 255, 255, 0.11));
+      --ui-card: var(--card, rgba(255, 255, 255, 0.045));
+    }
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    font-family: var(--font-ui);
+    color: var(--ui-fg);
+    -webkit-font-smoothing: antialiased;
+    font-size: 13px;
+    line-height: 1.35;
+  }
+
+  /* Transparent outer wrapper per host guidelines */
+  .stage {
+    width: 100%;
+    max-width: 712px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  /* Compact preview controls bar */
+  .controls-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 0 2px;
+  }
+
+  .controls-note {
+    font-size: 12px;
+    color: var(--ui-muted);
+  }
+
+  .controls-note strong {
+    color: var(--ui-fg);
+    font-weight: 600;
+  }
+
+  .pill-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 8px;
+    background: var(--ui-card);
+    border: 1px solid var(--ui-border);
+  }
+
+  .pill-btn {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--ui-muted);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 4px 9px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 150ms ease-out, color 150ms ease-out;
+  }
+
+  .pill-btn:hover { color: var(--ui-fg); }
+  .pill-btn[aria-pressed="true"] {
+    background: rgba(128, 128, 140, 0.22);
+    color: var(--ui-fg);
+    font-weight: 600;
+  }
+  .pill-btn:focus-visible {
+    outline: 2px solid var(--codex);
+    outline-offset: 1px;
+  }
+
+  /* Two-column stage: Left = All Overview, Right = Detail View (both live & interactive) */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    align-items: start;
+  }
+
+  @media (max-width: 680px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+
+  .col {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .col-caption {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 0 4px;
+    font-size: 11px;
+    color: var(--ui-muted);
+  }
+
+  .col-caption b {
+    font-weight: 600;
+    color: var(--ui-fg);
+  }
+
+  /* Simulated macOS Popover Surface */
+  .popover {
+    --pop-bg: rgba(30, 31, 35, 0.94);
+    --pop-elev: rgba(255, 255, 255, 0.055);
+    --pop-hover: rgba(255, 255, 255, 0.085);
+    --pop-active: rgba(255, 255, 255, 0.13);
+    --pop-border: rgba(255, 255, 255, 0.11);
+    --pop-divider: rgba(255, 255, 255, 0.075);
+    --pop-fg: #f3f4f6;
+    --pop-fg2: #b0b5c0;
+    --pop-fg3: #9096a3;
+    --pop-track: rgba(255, 255, 255, 0.11);
+    --pop-track-edge: rgba(255, 255, 255, 0.08);
+    --pop-tick: #f3f4f6;
+    --pop-shadow: 0 18px 40px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.28), inset 0 0.5px 0 rgba(255, 255, 255, 0.14);
+
+    position: relative;
+    width: 100%;
+    border-radius: 14px;
+    background: var(--pop-bg);
+    border: 1px solid var(--pop-border);
+    box-shadow: var(--pop-shadow);
+    color: var(--pop-fg);
+    overflow: visible;
+    user-select: none;
+  }
+
+  .stage[data-theme="light"] .popover {
+    --pop-bg: rgba(246, 246, 248, 0.97);
+    --pop-elev: rgba(0, 0, 0, 0.045);
+    --pop-hover: rgba(0, 0, 0, 0.065);
+    --pop-active: #ffffff;
+    --pop-border: rgba(0, 0, 0, 0.12);
+    --pop-divider: rgba(0, 0, 0, 0.08);
+    --pop-fg: #18181b;
+    --pop-fg2: #4b4f59;
+    --pop-fg3: #5e636e;
+    --pop-track: rgba(0, 0, 0, 0.1);
+    --pop-track-edge: rgba(0, 0, 0, 0.07);
+    --pop-tick: #18181b;
+    --pop-shadow: 0 16px 36px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.08), inset 0 0.5px 0 rgba(255, 255, 255, 0.9);
+  }
+
+  /* Top Navigation Strip */
+  .pop-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 10px 8px;
+    border-bottom: 1px solid var(--pop-divider);
+  }
+
+  .seg-bar {
+    flex: 1;
+    display: grid;
+    grid-template-columns: auto 1fr 1fr 1fr;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 9px;
+    background: var(--pop-elev);
+  }
+
+  .seg-btn {
+    position: relative;
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--pop-fg2);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 5px 6px;
+    border-radius: 7px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3.5px;
+    white-space: nowrap;
+    transition: background 150ms ease-out, color 150ms ease-out, box-shadow 150ms ease-out;
+  }
+  .seg-btn[data-tab="all"] { padding: 5px 9px; }
+
+  .seg-btn:hover { color: var(--pop-fg); }
+  .seg-btn[aria-selected="true"] {
+    background: var(--pop-active);
+    color: var(--pop-fg);
+    font-weight: 600;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
+  }
+  .seg-btn:focus-visible {
+    outline: 2px solid var(--codex);
+    outline-offset: 1px;
+  }
+
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .dot-codex { background: var(--codex); }
+  .dot-claude { background: var(--claude); }
+  .dot-gemini { background: var(--gemini); }
+
+  .tab-pct {
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    color: var(--pop-fg3);
+    font-weight: 600;
+  }
+  .seg-btn[aria-selected="true"] .tab-pct { color: var(--pop-fg2); }
+  .tab-pct.is-crit { color: var(--crit) !important; }
+
+  .tab-warn-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--warn);
+    flex-shrink: 0;
+  }
+
+  .icon-btn {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--pop-fg2);
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 150ms ease-out, color 150ms ease-out;
+  }
+
+  .icon-btn:hover {
+    background: var(--pop-hover);
+    color: var(--pop-fg);
+  }
+  .icon-btn:focus-visible {
+    outline: 2px solid var(--codex);
+    outline-offset: 1px;
+  }
+  .icon-btn.spinning svg {
+    animation: spin 600ms linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* Overview (All) List */
+  .overview-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .prov-block {
+    appearance: none;
+    border: none;
+    background: transparent;
+    text-align: left;
+    color: inherit;
+    font-family: inherit;
+    width: 100%;
+    padding: 11px 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--pop-divider);
+    transition: background 150ms ease-out;
+  }
+
+  .prov-block:hover { background: var(--pop-hover); }
+  .prov-block:focus-visible {
+    outline: 2px solid var(--codex);
+    outline-offset: -2px;
+  }
+
+  .prov-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .prov-name-wrap {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+  }
+
+  .prov-name {
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--pop-fg);
+  }
+
+  .prov-meta {
+    font-size: 11px;
+    color: var(--pop-fg3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .prov-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1.5px 6px;
+    border-radius: 5px;
+    letter-spacing: 0.01em;
+  }
+  .badge-warn {
+    background: rgba(245, 158, 11, 0.16);
+    color: #fbbf24;
+  }
+  .stage[data-theme="light"] .badge-warn {
+    background: rgba(217, 119, 6, 0.12);
+    color: #b45309;
+  }
+  .badge-crit {
+    background: rgba(239, 68, 68, 0.16);
+    color: #f87171;
+  }
+  .stage[data-theme="light"] .badge-crit {
+    background: rgba(220, 38, 38, 0.12);
+    color: #b91c1c;
+  }
+  .badge-subtle {
+    background: var(--pop-elev);
+    color: var(--pop-fg2);
+    font-weight: 500;
+  }
+
+  .chev {
+    color: var(--pop-fg3);
+    transition: transform 150ms ease-out, color 150ms ease-out;
+  }
+  .prov-block:hover .chev {
+    color: var(--pop-fg2);
+    transform: translateX(1.5px);
+  }
+
+  /* Paired mini gauges in Overview */
+  .mini-pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .mini-gauge {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .mini-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .mini-label {
+    font-size: 11px;
+    color: var(--pop-fg2);
+    white-space: nowrap;
+  }
+
+  .mini-val {
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--pop-fg);
+  }
+  .mini-val.is-crit { color: #f87171; }
+  .stage[data-theme="light"] .mini-val.is-crit { color: #dc2626; }
+
+  .mini-sub {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 10.5px;
+    color: var(--pop-fg3);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Native-style UsageBarView with authentic pace tick notch */
+  .bar-wrap {
+    position: relative;
+    height: 10px;
+    display: flex;
+    align-items: center;
+  }
+
+  .bar-track {
+    position: relative;
+    width: 100%;
+    height: 6px;
+    border-radius: 99px;
+    background: var(--pop-track);
+    box-shadow: inset 0 0 0 0.5px var(--pop-track-edge);
+    overflow: hidden;
+  }
+
+  .bar-wrap.is-slim { height: 8px; }
+  .bar-wrap.is-slim .bar-track { height: 5px; }
+
+  .bar-fill {
+    height: 100%;
+    border-radius: 99px;
+    transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .fill-codex { background: var(--codex); }
+  .fill-claude { background: var(--claude); }
+  .fill-gemini { background: var(--gemini); }
+
+  .bar-tick {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--pop-tick);
+    transform: translateX(-50%);
+    box-shadow: 0 0 0 1.5px var(--pop-bg);
+    pointer-events: none;
+  }
+
+  /* Compact combined API-equivalent strip */
+  .cost-strip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 9px 13px;
+    border-bottom: 1px solid var(--pop-divider);
+    font-size: 11px;
+  }
+
+  .cost-strip-label {
+    color: var(--pop-fg2);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .cost-strip-vals {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-variant-numeric: tabular-nums;
+    color: var(--pop-fg);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .cost-strip-vals span { color: var(--pop-fg3); font-weight: 400; }
+
+  /* Detail View */
+  .detail-body {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .detail-header {
+    padding: 11px 13px 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-bottom: 1px solid var(--pop-divider);
+  }
+
+  .account-wrap {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .account-btn {
+    appearance: none;
+    border: none;
+    background: transparent;
+    padding: 0;
+    color: var(--pop-fg);
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    text-align: left;
+    max-width: 100%;
+  }
+
+  .account-btn span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .account-btn:hover { opacity: 0.85; }
+
+  .account-sub {
+    font-size: 11px;
+    color: var(--pop-fg2);
+  }
+
+  .live-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10.5px;
+    color: var(--pop-fg2);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+
+  .live-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ok);
+  }
+  .live-dot.is-warn { background: var(--warn); }
+
+  /* Inline actionable banner (replaces truncated status + raw menu row) */
+  .alert-banner {
+    margin: 10px 13px 2px;
+    padding: 8px 10px;
+    border-radius: 9px;
+    background: rgba(245, 158, 11, 0.11);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .stage[data-theme="light"] .alert-banner {
+    background: rgba(245, 158, 11, 0.1);
+    border-color: rgba(217, 119, 6, 0.28);
+  }
+
+  .alert-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .alert-title {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #fbbf24;
+  }
+  .stage[data-theme="light"] .alert-title { color: #b45309; }
+
+  .alert-desc {
+    font-size: 10.5px;
+    color: var(--pop-fg2);
+  }
+
+  .alert-action {
+    appearance: none;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    background: rgba(245, 158, 11, 0.14);
+    color: #fcd34d;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: background 150ms ease-out;
+  }
+  .alert-action:hover { background: rgba(245, 158, 11, 0.24); }
+  .stage[data-theme="light"] .alert-action {
+    color: #92400e;
+    background: rgba(245, 158, 11, 0.16);
+  }
+
+  /* Full Usage Rows */
+  .usage-list {
+    padding: 6px 13px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .usage-row {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .usage-row-top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .usage-title {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--pop-fg);
+  }
+
+  .usage-pct {
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--pop-fg);
+  }
+  .usage-pct span {
+    font-size: 10.5px;
+    font-weight: 400;
+    color: var(--pop-fg2);
+    margin-left: 2px;
+  }
+  .usage-pct.is-crit { color: #f87171; }
+  .stage[data-theme="light"] .usage-pct.is-crit { color: #dc2626; }
+
+  .usage-sub {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--pop-fg2);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .pace-note {
+    font-size: 10.5px;
+    color: var(--pop-fg3);
+  }
+
+  /* 3-cell compact API estimate strip */
+  .cost-grid {
+    margin: 2px 13px 10px;
+    padding: 7px 10px;
+    border-radius: 9px;
+    background: var(--pop-elev);
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+
+  .cost-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .cost-k {
+    font-size: 10px;
+    color: var(--pop-fg3);
+  }
+
+  .cost-v {
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--pop-fg);
+  }
+
+  /* Contextual Provider Action Row */
+  .ctx-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 13px 10px;
+    border-bottom: 1px solid var(--pop-divider);
+  }
+
+  .ctx-btn {
+    flex: 1;
+    appearance: none;
+    border: 1px solid var(--pop-border);
+    background: var(--pop-elev);
+    color: var(--pop-fg);
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 500;
+    padding: 5.5px 9px;
+    border-radius: 7px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    transition: background 150ms ease-out;
+  }
+  .ctx-btn:hover { background: var(--pop-hover); }
+  .ctx-btn.is-secondary {
+    flex: 0 0 auto;
+    color: var(--pop-fg2);
+  }
+
+  /* Unified Compact Footer (replaces 7 menu items + 3 dividers) */
+  .pop-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 7px 10px;
+  }
+
+  .footer-link {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--pop-fg);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 4px 7px;
+    border-radius: 7px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    transition: background 150ms ease-out;
+  }
+  .footer-link:hover { background: var(--pop-hover); }
+
+  .footer-right {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .quit-btn {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--pop-fg2);
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 500;
+    padding: 4px 7px;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: background 150ms ease-out, color 150ms ease-out;
+  }
+  .quit-btn:hover {
+    background: rgba(239, 68, 68, 0.14);
+    color: #f87171;
+  }
+
+  /* Inline Settings / Accounts Dropdown inside Popover */
+  .sub-sheet {
+    position: absolute;
+    right: 10px;
+    bottom: 42px;
+    width: 224px;
+    border-radius: 10px;
+    background: var(--pop-bg);
+    border: 1px solid var(--pop-border);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+    padding: 6px;
+    z-index: 20;
+    display: none;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .sub-sheet.is-open { display: flex; }
+
+  .sub-sheet.is-top {
+    top: 84px;
+    left: 12px;
+    right: auto;
+    bottom: auto;
+    width: 248px;
+  }
+
+  .sheet-head {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--pop-fg3);
+    padding: 4px 8px 2px;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+
+  .sheet-item {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--pop-fg);
+    font-family: inherit;
+    font-size: 11.5px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    cursor: pointer;
+    text-align: left;
+  }
+  .sheet-item:hover { background: var(--pop-hover); }
+  .sheet-item small { color: var(--pop-fg3); font-size: 10.5px; }
+
+  .sheet-div {
+    height: 1px;
+    background: var(--pop-divider);
+    margin: 4px 4px;
+  }
+
+  .check-mark {
+    color: var(--codex);
+    font-weight: 700;
+    font-size: 11px;
+  }
+
+  /* Compact summary strip at bottom */
+  .delta-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    background: var(--ui-card);
+    border: 1px solid var(--ui-border);
+    font-size: 11.5px;
+    color: var(--ui-muted);
+    justify-content: space-between;
+  }
+  .delta-strip b { color: var(--ui-fg); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="stage" id="stage" data-theme="dark">
+  <div class="controls-bar">
+    <div class="controls-note"><strong>Interactive mock:</strong> click any tab, provider row, account, or settings icon</div>
+    <div class="pill-group" role="group" aria-label="Appearance">
+      <button class="pill-btn" data-set-theme="dark" aria-pressed="true">Dark</button>
+      <button class="pill-btn" data-set-theme="light" aria-pressed="false">Light</button>
+    </div>
+  </div>
+
+  <div class="grid">
+    <!-- LEFT POPOVER: starts on Overview (All 3 providers) -->
+    <div class="col">
+      <div class="col-caption">
+        <span><b>Overview tab</b> (all 3 providers at once)</span>
+        <span>~415px tall</span>
+      </div>
+      <div class="popover" data-popover="left"></div>
+    </div>
+
+    <!-- RIGHT POPOVER: starts on Gemini (or switchable to Codex / Claude) -->
+    <div class="col">
+      <div class="col-caption">
+        <span><b>Detail tab</b> (click Codex / Claude / Gemini)</span>
+        <span>Contextual actions</span>
+      </div>
+      <div class="popover" data-popover="right"></div>
+    </div>
+  </div>
+
+  <div class="delta-strip">
+    <span>Height: <b>~415px</b> (down from ~790px with 2, or ~1,100px with 3)</span>
+    <span>Footer rows: <b>1 bar</b> (down from 7 rows + 3 dividers)</span>
+    <span>Gemini: <b>Pro 24h + Flash 24h + local API-equiv</b></span>
+  </div>
+</div>
+
+<script>
+(() => {
+  const ICON = {
+    refresh: `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.35-3.6"/><path d="M13.5 2.75v2.75h-2.75"/></svg>`,
+    gear: `<svg width="13.5" height="13.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/><circle cx="5.5" cy="4.5" r="1.4" fill="currentColor" stroke="none"/><circle cx="10.5" cy="8" r="1.4" fill="currentColor" stroke="none"/><circle cx="6.5" cy="11.5" r="1.4" fill="currentColor" stroke="none"/></svg>`,
+    chart: `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 13.5h11"/><path d="M4.5 11V8"/><path d="M8 11V4.5"/><path d="M11.5 11V6.5"/></svg>`,
+    chev: `<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L10.5 8 6 12.5"/></svg>`,
+    chevDown: `<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg>`,
+    ext: `<svg width="11.5" height="11.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5H3.5v9h9v-3"/><path d="M9.5 2.5h4v4"/><path d="M7.5 8.5l6-6"/></svg>`,
+    copy: `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="7.5" height="7.5" rx="1.5"/><path d="M3.5 10.5H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h6.5a1 1 0 0 1 1 1v.5"/></svg>`
+  };
+
+  const DATA = {
+    codex: {
+      id: 'codex',
+      name: 'Codex',
+      dot: 'dot-codex',
+      fill: 'fill-codex',
+      accounts: [
+        { email: 'Codex Account', plan: 'Plus · renews 14 May' },
+        { email: 'Work Account', plan: 'Pro 20× · renews 2 Jun' }
+      ],
+      activeAccountIdx: 0,
+      badge: 'Plus',
+      liveText: 'Live · 23:35',
+      warn: false,
+      headlinePct: 97,
+      windows: [
+        { label: '5-hour window', short: '5-hour', pct: 97, reset: 'resets in 6 mins', shortReset: '6m left', pace: null },
+        { label: 'Weekly window', short: 'Weekly', pct: 0, reset: 'resets in 6 days 23 hrs', shortReset: '6d 23h', pace: 2 }
+      ],
+      cost: { d7: '$51.1', d30: '$51.4', all: '$17.7k' }
+    },
+    claude: {
+      id: 'claude',
+      name: 'Claude Code',
+      shortName: 'Claude',
+      dot: 'dot-claude',
+      fill: 'fill-claude',
+      account: 'Claude Max',
+      sub: 'OAuth + optional local bridge',
+      badge: 'Re-auth',
+      liveText: 'Stale · 23:30',
+      warn: true,
+      bridgeEnabled: false,
+      headlinePct: 4,
+      windows: [
+        { label: '5-hour window', short: '5-hour', pct: 4, reset: 'resets in 24 mins', shortReset: '24m left', pace: null },
+        { label: 'Weekly window', short: 'Weekly', pct: 34, reset: 'resets in 4 days 13 hrs', shortReset: '4d 13h', pace: 35, paceLabel: 'on pace' },
+        { label: 'Fable weekly', short: 'Fable', pct: 28, reset: 'resets in 4 days 13 hrs', shortReset: '4d 13h', pace: 35, paceLabel: 'under pace' }
+      ],
+      cost: { d7: '$793', d30: '$2,650', all: '$5,573' }
+    },
+    gemini: {
+      id: 'gemini',
+      name: 'Antigravity',
+      shortName: 'AGY',
+      dot: 'dot-gemini',
+      fill: 'fill-gemini',
+      account: 'Antigravity',
+      sub: 'Pro · Statusline + App & ACP logs',
+      badge: 'Pro',
+      liveText: 'Live · 23:35',
+      warn: false,
+      headlinePct: 28,
+      windows: [
+        { label: 'Gemini 5-hour', short: '5-hour', pct: 28, reset: 'resets in 2 hrs 15 mins', shortReset: '2h 15m', pace: null },
+        { label: 'Gemini weekly', short: 'Weekly', pct: 12, reset: 'resets in 5 days 4 hrs', shortReset: '5d 4h', pace: 26, paceLabel: 'under pace' }
+      ],
+      cost: { d7: '$18.4', d30: '$64.2', all: '$219' }
+    }
+  };
+
+  const state = {
+    left: { tab: 'all', settingsOpen: false, accountsOpen: false, spinning: false, copied: false },
+    right: { tab: 'gemini', settingsOpen: false, accountsOpen: false, spinning: false, copied: false },
+    menuBarIcon: 'codex',
+    launchAtLogin: true,
+    enabled: { codex: true, claude: true, gemini: true }
+  };
+
+  function barHTML(pct, fillClass, pace, slim = false) {
+    const w = pct === 0 ? 0 : Math.max(pct, 2.5);
+    const tickPos = pace != null ? Math.min(Math.max(pace, 3), 97) : null;
+    const tick = tickPos != null ? `<div class="bar-tick" style="left:${tickPos}%" title="Even pace: ${pace}%"></div>` : '';
+    return `
+      <div class="bar-wrap${slim ? ' is-slim' : ''}">
+        <div class="bar-track">
+          <div class="bar-fill ${fillClass}" style="width:${w}%"></div>
+        </div>
+        ${tick}
+      </div>
+    `;
+  }
+
+  function renderOverview() {
+    const rows = ['codex', 'claude', 'gemini']
+      .filter(id => state.enabled[id])
+      .map(id => {
+        const p = DATA[id];
+        const w1 = p.windows[0];
+        const w2 = p.windows[1];
+        const extra = p.windows[2];
+        const badgeHTML = p.warn
+          ? `<span class="badge badge-warn">Sign-in expired</span>`
+          : (w1.pct >= 90 ? `<span class="badge badge-crit">Near limit</span>` : `<span class="badge badge-subtle">${p.badge}</span>`);
+        const meta = id === 'codex'
+          ? ''
+          : (extra ? `${extra.short} ${extra.pct}%` : '');
+
+        return `
+          <button class="prov-block" data-open-tab="${id}">
+            <div class="prov-head">
+              <div class="prov-name-wrap">
+                <span class="dot ${p.dot}"></span>
+                <span class="prov-name">${p.name}</span>
+                ${meta ? `<span class="prov-meta">${meta}</span>` : ''}
+              </div>
+              <div class="prov-right">
+                ${badgeHTML}
+                <span class="chev">${ICON.chev}</span>
+              </div>
+            </div>
+            <div class="mini-pair">
+              <div class="mini-gauge">
+                <div class="mini-row">
+                  <span class="mini-label">${w1.short}</span>
+                  <span class="mini-val${w1.pct >= 90 ? ' is-crit' : ''}">${w1.pct}%</span>
+                </div>
+                ${barHTML(w1.pct, p.fill, w1.pace, true)}
+                <div class="mini-sub"><span>${w1.shortReset}</span></div>
+              </div>
+              <div class="mini-gauge">
+                <div class="mini-row">
+                  <span class="mini-label">${w2.short}</span>
+                  <span class="mini-val${w2.pct >= 90 ? ' is-crit' : ''}">${w2.pct}%</span>
+                </div>
+                ${barHTML(w2.pct, p.fill, w2.pace, true)}
+                <div class="mini-sub"><span>${w2.shortReset}</span></div>
+              </div>
+            </div>
+          </button>
+        `;
+      }).join('');
+
+    return `
+      <div class="overview-list">${rows}</div>
+      <div class="cost-strip" title="Combined API-equivalent estimate across enabled providers">
+        <span class="cost-strip-label">API-equiv</span>
+        <span class="cost-strip-vals">7d $862 <span>·</span> 30d $2,766 <span>·</span> All $23.5k</span>
+      </div>
+    `;
+  }
+
+  function renderDetail(id, side) {
+    const p = DATA[id];
+    const isCodex = id === 'codex';
+    const isClaude = id === 'claude';
+    const isGemini = id === 'gemini';
+    const acct = isCodex ? p.accounts[p.activeAccountIdx] : null;
+
+    const headerTitle = isCodex
+      ? `<button class="account-btn" data-toggle-accounts><span>${acct.email}</span>${ICON.chevDown}</button>`
+      : `<div class="prov-name">${isGemini ? p.account : p.name}</div>`;
+    const headerSub = isCodex ? acct.plan : p.sub;
+
+    const bannerHTML = isClaude && p.warn ? `
+      <div class="alert-banner">
+        <div class="alert-copy">
+          <div class="alert-title">Claude sign-in expired</div>
+          <div class="alert-desc">Open Claude Code to refresh OAuth token</div>
+        </div>
+        <button class="alert-action" data-fix-claude>Refresh</button>
+      </div>
+    ` : '';
+
+    const usageRows = p.windows.map(w => `
+      <div class="usage-row">
+        <div class="usage-row-top">
+          <span class="usage-title">${w.label}</span>
+          <span class="usage-pct${w.pct >= 90 ? ' is-crit' : ''}">${w.pct}%<span>used</span></span>
+        </div>
+        ${barHTML(w.pct, p.fill, w.pace, false)}
+        <div class="usage-sub">
+          <span>${w.reset}</span>
+          ${w.paceLabel ? `<span class="pace-note">${w.paceLabel}</span>` : ''}
+        </div>
+      </div>
+    `).join('');
+
+    let ctxHTML = '';
+    if (isCodex) {
+      ctxHTML = `
+        <div class="ctx-actions">
+          <button class="ctx-btn">${ICON.ext} Open Codex</button>
+          <button class="ctx-btn is-secondary">Log Out</button>
+        </div>
+      `;
+    } else if (isClaude) {
+      ctxHTML = `
+        <div class="ctx-actions">
+          <button class="ctx-btn" data-toggle-bridge>${p.bridgeEnabled ? 'Local bridge enabled ✓' : 'Enable local usage bridge'}</button>
+          <button class="ctx-btn is-secondary">${ICON.ext} Claude</button>
+        </div>
+      `;
+    } else {
+      ctxHTML = `
+        <div class="ctx-actions">
+          <button class="ctx-btn">${ICON.ext} Open AGY</button>
+          <button class="ctx-btn is-secondary">Rescan</button>
+        </div>
+      `;
+    }
+
+    const acctSheet = isCodex ? `
+      <div class="sub-sheet is-top${state[side].accountsOpen ? ' is-open' : ''}">
+        <div class="sheet-head">Codex Accounts</div>
+        ${p.accounts.map((a, idx) => `
+          <button class="sheet-item" data-pick-account="${idx}">
+            <span>${a.email}<br><small>${a.plan.split(' · ')[0]}</small></span>
+            ${idx === p.activeAccountIdx ? '<span class="check-mark">✓</span>' : ''}
+          </button>
+        `).join('')}
+        <div class="sheet-div"></div>
+        <button class="sheet-item" data-close-sheets>Add Account…</button>
+      </div>
+    ` : '';
+
+    return `
+      <div class="detail-body">
+        <div class="detail-header">
+          <div class="account-wrap">
+            ${headerTitle}
+            <div class="account-sub">${headerSub}</div>
+          </div>
+          <div class="live-pill">
+            <span class="live-dot${p.warn ? ' is-warn' : ''}"></span>
+            <span>${p.liveText}</span>
+          </div>
+        </div>
+        ${bannerHTML}
+        <div class="usage-list">${usageRows}</div>
+        <div class="cost-grid" title="API-equivalent estimate from local ${p.name} session logs">
+          <div class="cost-cell"><span class="cost-k">7d est.</span><span class="cost-v">${p.cost.d7}</span></div>
+          <div class="cost-cell"><span class="cost-k">30d est.</span><span class="cost-v">${p.cost.d30}</span></div>
+          <div class="cost-cell"><span class="cost-k">All-time</span><span class="cost-v">${p.cost.all}</span></div>
+        </div>
+        ${ctxHTML}
+        ${acctSheet}
+      </div>
+    `;
+  }
+
+  function renderPopover(side) {
+    const el = document.querySelector(`[data-popover="${side}"]`);
+    const s = state[side];
+    const tab = s.tab;
+
+    const topHTML = `
+      <div class="pop-top">
+        <div class="seg-bar" role="tablist">
+          <button class="seg-btn" role="tab" data-tab="all" aria-selected="${tab === 'all'}">All</button>
+          <button class="seg-btn" role="tab" data-tab="codex" aria-selected="${tab === 'codex'}">
+            <span class="dot dot-codex"></span>Codex
+            <span class="tab-pct is-crit">${DATA.codex.headlinePct}%</span>
+          </button>
+          <button class="seg-btn" role="tab" data-tab="claude" aria-selected="${tab === 'claude'}">
+            <span class="dot dot-claude"></span>Claude
+            ${DATA.claude.warn ? '<span class="tab-warn-dot" title="Sign-in expired"></span>' : `<span class="tab-pct">${DATA.claude.headlinePct}%</span>`}
+          </button>
+          <button class="seg-btn" role="tab" data-tab="gemini" aria-selected="${tab === 'gemini'}">
+            <span class="dot dot-gemini"></span>Gemini
+            <span class="tab-pct">${DATA.gemini.headlinePct}%</span>
+          </button>
+        </div>
+        <button class="icon-btn${s.spinning ? ' spinning' : ''}" data-refresh title="Refresh all providers" aria-label="Refresh">
+          ${ICON.refresh}
+        </button>
+      </div>
+    `;
+
+    const bodyHTML = tab === 'all' ? renderOverview() : renderDetail(tab, side);
+
+    const settingsSheet = `
+      <div class="sub-sheet${s.settingsOpen ? ' is-open' : ''}">
+        <div class="sheet-head">Menu Bar Icon</div>
+        ${['codex', 'claude', 'gemini'].map(id => `
+          <button class="sheet-item" data-set-icon="${id}">
+            <span>${DATA[id].name}</span>
+            ${state.menuBarIcon === id ? '<span class="check-mark">✓</span>' : ''}
+          </button>
+        `).join('')}
+        <div class="sheet-div"></div>
+        <div class="sheet-head">App</div>
+        <button class="sheet-item" data-toggle-launch>
+          <span>Launch at Login</span>
+          ${state.launchAtLogin ? '<span class="check-mark">✓</span>' : ''}
+        </button>
+        <button class="sheet-item" data-copy-debug>
+          <span>${s.copied ? 'Copied debug info ✓' : 'Copy Debug Info'}</span>
+          ${ICON.copy}
+        </button>
+      </div>
+    `;
+
+    const footerHTML = `
+      <div class="pop-footer">
+        <button class="footer-link">${ICON.chart} Usage History…</button>
+        <div class="footer-right">
+          <button class="icon-btn" data-toggle-settings title="Settings & Providers" aria-label="Settings">${ICON.gear}</button>
+          <button class="quit-btn">Quit</button>
+        </div>
+      </div>
+      ${settingsSheet}
+    `;
+
+    el.innerHTML = topHTML + bodyHTML + footerHTML;
+
+    el.querySelectorAll('[data-tab]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        s.tab = btn.dataset.tab;
+        s.settingsOpen = false;
+        s.accountsOpen = false;
+        renderPopover(side);
+      });
+    });
+
+    el.querySelectorAll('[data-open-tab]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        s.tab = btn.dataset.openTab;
+        renderPopover(side);
+      });
+    });
+
+    const refBtn = el.querySelector('[data-refresh]');
+    if (refBtn) {
+      refBtn.addEventListener('click', () => {
+        s.spinning = true;
+        renderPopover(side);
+        setTimeout(() => { s.spinning = false; renderPopover(side); }, 650);
+      });
+    }
+
+    const gearBtn = el.querySelector('[data-toggle-settings]');
+    if (gearBtn) {
+      gearBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        s.settingsOpen = !s.settingsOpen;
+        s.accountsOpen = false;
+        renderPopover(side);
+      });
+    }
+
+    const acctBtn = el.querySelector('[data-toggle-accounts]');
+    if (acctBtn) {
+      acctBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        s.accountsOpen = !s.accountsOpen;
+        s.settingsOpen = false;
+        renderPopover(side);
+      });
+    }
+
+    el.querySelectorAll('[data-pick-account]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        DATA.codex.activeAccountIdx = Number(btn.dataset.pickAccount);
+        s.accountsOpen = false;
+        renderAll();
+      });
+    });
+
+    el.querySelectorAll('[data-set-icon]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.menuBarIcon = btn.dataset.setIcon;
+        renderAll();
+      });
+    });
+
+    const launchBtn = el.querySelector('[data-toggle-launch]');
+    if (launchBtn) {
+      launchBtn.addEventListener('click', () => {
+        state.launchAtLogin = !state.launchAtLogin;
+        renderAll();
+      });
+    }
+
+    const copyBtn = el.querySelector('[data-copy-debug]');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', () => {
+        s.copied = true;
+        renderPopover(side);
+        setTimeout(() => { s.copied = false; renderPopover(side); }, 1400);
+      });
+    }
+
+    const fixClaude = el.querySelector('[data-fix-claude]');
+    if (fixClaude) {
+      fixClaude.addEventListener('click', () => {
+        DATA.claude.warn = false;
+        DATA.claude.liveText = 'Live · 23:36';
+        DATA.claude.badge = 'Max';
+        renderAll();
+      });
+    }
+
+    const bridgeBtn = el.querySelector('[data-toggle-bridge]');
+    if (bridgeBtn) {
+      bridgeBtn.addEventListener('click', () => {
+        DATA.claude.bridgeEnabled = !DATA.claude.bridgeEnabled;
+        renderAll();
+      });
+    }
+
+    el.querySelectorAll('[data-close-sheets]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        s.accountsOpen = false;
+        s.settingsOpen = false;
+        renderPopover(side);
+      });
+    });
+  }
+
+  function renderAll() {
+    renderPopover('left');
+    renderPopover('right');
+  }
+
+  document.querySelectorAll('[data-set-theme]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const theme = btn.dataset.setTheme;
+      document.getElementById('stage').dataset.theme = theme;
+      document.querySelectorAll('[data-set-theme]').forEach(b => {
+        b.setAttribute('aria-pressed', String(b.dataset.setTheme === theme));
+      });
+    });
+  });
+
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.sub-sheet') && !e.target.closest('[data-toggle-settings]') && !e.target.closest('[data-toggle-accounts]')) {
+      let changed = false;
+      for (const side of ['left', 'right']) {
+        if (state[side].settingsOpen || state[side].accountsOpen) {
+          state[side].settingsOpen = false;
+          state[side].accountsOpen = false;
+          changed = true;
+        }
+      }
+      if (changed) renderAll();
+    }
+  });
+
+  renderAll();
+})();
+</script>
+</body>
+</html>

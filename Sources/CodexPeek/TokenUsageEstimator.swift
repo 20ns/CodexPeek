@@ -396,7 +396,23 @@ struct TokenPricingCatalog: Sendable {
         "claude-sonnet-4-5": claudePrice("Claude Sonnet 4.5", "3", "15", "0.3", us: false, longContextAt: 200_000),
         "claude-sonnet-4": claudePrice("Claude Sonnet 4", "3", "15", "0.3", us: false, longContextAt: 200_000),
         "claude-haiku-4-5": claudePrice("Claude Haiku 4.5", "1", "5", "0.1", us: false),
-        "claude-haiku-3-5": claudePrice("Claude Haiku 3.5", "0.8", "4", "0.08", us: false)
+        "claude-haiku-3-5": claudePrice("Claude Haiku 3.5", "0.8", "4", "0.08", us: false),
+        "gemini-4-neon": Price(inputPerMillion: 3, cachedInputPerMillion: Decimal(string: "0.15")!, outputPerMillion: 15, displayName: "Gemini 4 Neon"),
+        "gemini-4-carbon": Price(inputPerMillion: 2, cachedInputPerMillion: Decimal(string: "0.1")!, outputPerMillion: 10, displayName: "Gemini 4 Carbon"),
+        "gemini-4-argon": Price(inputPerMillion: 2, cachedInputPerMillion: Decimal(string: "0.1")!, outputPerMillion: 10, displayName: "Gemini 4 Argon"),
+        "gemini-4-hydrogen": Price(inputPerMillion: Decimal(string: "1.5")!, cachedInputPerMillion: Decimal(string: "0.075")!, outputPerMillion: Decimal(string: "7.5")!, displayName: "Gemini 4 Hydrogen"),
+        "gemini-3.8-flash": Price(inputPerMillion: Decimal(string: "0.75")!, cachedInputPerMillion: Decimal(string: "0.075")!, outputPerMillion: Decimal(string: "3.75")!, displayName: "Gemini 3.8 Flash"),
+        "gemini-3.7-flash": Price(inputPerMillion: Decimal(string: "0.75")!, cachedInputPerMillion: Decimal(string: "0.075")!, outputPerMillion: Decimal(string: "3.75")!, displayName: "Gemini 3.7 Flash"),
+        "gemini-3.6-flash": Price(inputPerMillion: Decimal(string: "0.75")!, cachedInputPerMillion: Decimal(string: "0.075")!, outputPerMillion: Decimal(string: "3.75")!, displayName: "Gemini 3.6 Flash"),
+        "gemini-3.5-flash": Price(inputPerMillion: Decimal(string: "1.5")!, cachedInputPerMillion: Decimal(string: "0.15")!, outputPerMillion: 9, displayName: "Gemini 3.5 Flash"),
+        "gemini-3.5-flash-lite": Price(inputPerMillion: Decimal(string: "0.3")!, cachedInputPerMillion: Decimal(string: "0.03")!, outputPerMillion: Decimal(string: "2.5")!, displayName: "Gemini 3.5 Flash Lite"),
+        "gemini-3.1-flash-lite": Price(inputPerMillion: Decimal(string: "0.25")!, cachedInputPerMillion: Decimal(string: "0.025")!, outputPerMillion: Decimal(string: "1.5")!, displayName: "Gemini 3.1 Flash Lite"),
+        "gemini-3.1-pro-preview": Price(inputPerMillion: 2, cachedInputPerMillion: 0.2, outputPerMillion: 12, displayName: "Gemini 3.1 Pro", longContext: true, longContextThreshold: 200_000, longInputScale: 2, longOutputScale: Decimal(string: "1.5")!),
+        "gemini-3-pro-preview": Price(inputPerMillion: 2, cachedInputPerMillion: 0.2, outputPerMillion: 12, displayName: "Gemini 3 Pro", longContext: true, longContextThreshold: 200_000, longInputScale: 2, longOutputScale: Decimal(string: "1.5")!),
+        "gemini-3-flash-preview": Price(inputPerMillion: Decimal(string: "0.5")!, cachedInputPerMillion: Decimal(string: "0.05")!, outputPerMillion: 3, displayName: "Gemini 3 Flash"),
+        "gemini-2.5-pro": Price(inputPerMillion: Decimal(string: "1.25")!, cachedInputPerMillion: Decimal(string: "0.125")!, outputPerMillion: 10, displayName: "Gemini 2.5 Pro", longContext: true, longContextThreshold: 200_000, longInputScale: 2, longOutputScale: Decimal(string: "1.5")!),
+        "gemini-2.5-flash": Price(inputPerMillion: Decimal(string: "0.3")!, cachedInputPerMillion: Decimal(string: "0.03")!, outputPerMillion: Decimal(string: "2.5")!, displayName: "Gemini 2.5 Flash"),
+        "gemini-2.5-flash-lite": Price(inputPerMillion: Decimal(string: "0.1")!, cachedInputPerMillion: Decimal(string: "0.01")!, outputPerMillion: Decimal(string: "0.4")!, displayName: "Gemini 2.5 Flash Lite")
     ])
 
     private static func claudePrice(
@@ -447,10 +463,40 @@ struct TokenPricingCatalog: Sendable {
                 merged[id] = known
             } else if price(for: id) == nil { // dated snapshots of known models keep the built-in rules
                 merged[id] = Price(inputPerMillion: rates.input, cachedInputPerMillion: rates.cachedInput, outputPerMillion: rates.output,
-                                   displayName: id, fastModeUnpriced: true)
+                                   displayName: Self.humanDisplayName(for: id), fastModeUnpriced: true)
             }
         }
         return TokenPricingCatalog(prices: merged)
+    }
+
+    static func humanDisplayName(for rawID: String) -> String {
+        let trimmed = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return rawID }
+        var parts = trimmed.split(separator: "-").map(String.init)
+        if parts.last?.lowercased() == "preview" || parts.last?.lowercased() == "latest" {
+            parts.removeLast()
+        }
+        guard !parts.isEmpty else { return trimmed }
+        if parts[0].lowercased() == "gpt", parts.count >= 2 {
+            let version = "GPT-\(parts[1])"
+            let rest = parts.dropFirst(2).map { $0.capitalized }
+            return ([version] + rest).joined(separator: " ")
+        }
+        if parts[0].lowercased() == "claude", parts.count >= 3 {
+            // Merge trailing numeric version parts like ["claude", "opus", "5", "5"] -> "Claude Opus 5.5"
+            var out = ["Claude", parts[1].capitalized]
+            let tail = Array(parts.dropFirst(2))
+            if tail.allSatisfy({ $0.allSatisfy(\.isNumber) && $0.count <= 2 }) {
+                out.append(tail.joined(separator: "."))
+            } else {
+                out.append(contentsOf: tail.map { $0.capitalized })
+            }
+            return out.joined(separator: " ")
+        }
+        if parts[0].lowercased() == "gemini" {
+            return parts.map { $0.allSatisfy({ $0.isNumber || $0 == "." }) ? $0 : $0.capitalized }.joined(separator: " ")
+        }
+        return trimmed
     }
 
     private static let write5Rate = Decimal(string: "1.25")!
@@ -533,7 +579,7 @@ struct TokenPricingCatalog: Sendable {
     }
 
     func displayModelName(for model: String) -> String {
-        price(for: model)?.displayName ?? model
+        price(for: model)?.displayName ?? Self.humanDisplayName(for: model)
     }
 
     func fastCreditMultiplier(for model: String) -> Decimal? {
@@ -567,8 +613,20 @@ struct TokenPricingCatalog: Sendable {
         return Decimal(string: "1.1") ?? 1
     }
 
+    static func canonicalAntigravityModelID(_ rawID: String) -> String {
+        var lower = rawID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lower.hasPrefix("gemini/") {
+            lower = String(lower.dropFirst("gemini/".count))
+        }
+        for suffix in ["-xhigh", "-medium", "-high", "-low", "-max"] where lower.hasSuffix(suffix) {
+            lower = String(lower.dropLast(suffix.count))
+            break
+        }
+        return lower
+    }
+
     private func price(for model: String) -> Price? {
-        let normalized = model.lowercased()
+        let normalized = Self.canonicalAntigravityModelID(model)
         if let exact = prices[normalized] {
             return exact
         }
@@ -661,6 +719,7 @@ struct TokenUsageSessionIndex: Codable {
 
     var schemaVersion = TokenUsageSessionIndex.schemaVersion
     var claudeParserVersion: Int? = nil
+    var agyParserVersion: Int? = nil
     var sessions: [String: IndexedSessionUsage] = [:]
 }
 

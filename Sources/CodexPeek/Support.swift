@@ -87,6 +87,29 @@ enum UIFormatters {
         return "resets soon"
     }
 
+    private static let usageUpdatedShort: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    nonisolated static func shortResetCountdownString(from date: Date, now: Date = Date()) -> String {
+        let secondsRemaining = max(0, Int(date.timeIntervalSince(now)))
+        let minutesRemaining = max(0, secondsRemaining / 60)
+        let days = minutesRemaining / (24 * 60)
+        let hours = (minutesRemaining % (24 * 60)) / 60
+        let minutes = minutesRemaining % 60
+
+        if days > 0 { return "\(days)d \(hours)h" }
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        if minutes > 0 { return "\(minutes)m left" }
+        return "soon"
+    }
+
+    static func usageUpdatedShortString(from date: Date) -> String {
+        usageUpdatedShort.string(from: date)
+    }
+
     static func usageUpdatedString(from date: Date) -> String {
         usageUpdated.string(from: date)
     }

@@ -21,6 +21,25 @@ if CommandLine.arguments.contains("--claude-statusline") {
         fputs("Could not enable Claude local usage: \(error.localizedDescription)\n", stderr)
         exit(1)
     }
+} else if CommandLine.arguments.contains("--agy-statusline") {
+    do {
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        if let snapshot = try AntigravityStatusLine.capture(data), !CommandLine.arguments.contains("--quiet") {
+            let parts = snapshot.activeBuckets.prefix(2).map { "\($0.title): \($0.window.usedPercent)%" }
+            if !parts.isEmpty { print("AGY • " + parts.joined(separator: " • ")) }
+        }
+    } catch {
+        exit(1)
+    }
+} else if CommandLine.arguments.contains("--setup-agy-statusline") {
+    do {
+        guard let executableURL = Bundle.main.executableURL else { exit(1) }
+        try AntigravityStatusLine.install(executableURL: executableURL)
+        print("Antigravity statusline enabled. Quota readings appear after agy activity.")
+    } catch {
+        fputs("Could not enable Antigravity statusline: \(error.localizedDescription)\n", stderr)
+        exit(1)
+    }
 } else if CommandLine.arguments.contains("--backfill-claude") {
     do {
         let base = AccountProfileStore.baseSupportURL()

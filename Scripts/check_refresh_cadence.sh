@@ -26,7 +26,7 @@ cat > "$CHECK_DIR/main.swift" <<'SWIFT'
 import AppKit
 import Foundation
 
-// Replace only account IO; exercise the real Claude controller callbacks offline.
+// Replace only network IO; exercise the real Claude & Codex & Gemini controller callbacks offline.
 @MainActor final class ClaudeCodeUsageSource {
     var calls = 0
     var nextSnapshot: ClaudeCodeUsageSnapshot?
@@ -74,10 +74,29 @@ let defaults = UserDefaults(suiteName: suiteName)!
 defer { defaults.removePersistentDomain(forName: suiteName) }
 let controller = AppController(accountStore: AccountProfileStore(
     stateURL: root.appendingPathComponent("accounts.json"), managedProfilesRootURL: root), defaults: defaults)
-controller.configureMenu()
-precondition(controller.codexEnabled && controller.claudeEnabled, "Both providers must default to enabled")
+controller.configureStatusItem()
+controller.configurePopover()
+precondition(controller.codexEnabled && controller.claudeEnabled && controller.agyEnabled, "All three providers must default to enabled")
+precondition(!controller.showAccountEmail, "Account email must be hidden by default")
+precondition(controller.statusItem.button?.toolTip == nil, "Status bar button must not set a sticky toolTip")
+
+// Privacy check: a managed profile named with an email must not leak when showAccountEmail == false.
+let managedEmailProfile = AccountProfile(id: "managed-1", name: "hidden@example.com", homePath: root.path, kind: .managed)
+let signedInSnap = CodexAccountSnapshot(email: "hidden@example.com", authMode: .chatgpt, planType: .plus)
+controller.activeProfile = managedEmailProfile
+controller.accountState = AccountProfilesState(profiles: [profile, managedEmailProfile], activeProfileID: managedEmailProfile.id)
+controller.accountSnapshotsByProfileID = [managedEmailProfile.id: signedInSnap]
+let safeLabel = controller.privacySafeProfileLabel(for: managedEmailProfile, snapshot: signedInSnap)
+precondition(!safeLabel.contains("hidden@example.com"), "Hidden profile label must not leak email")
+let redactedDebug = controller.debugSummary()
+precondition(!redactedDebug.contains("hidden@example.com"), "Debug summary must not leak managed profile email when hidden")
+let hiddenChoices = controller.buildAccountChoices()
+precondition(hiddenChoices.allSatisfy { !$0.title.contains("hidden@example.com") }, "Account choices must not leak email when hidden")
+
 let source = CountingSource()
 controller.activeProfile = profile
+controller.accountState = AccountProfilesState(profiles: [profile], activeProfileID: profile.id)
+controller.accountSnapshotsByProfileID = [:]
 controller.repository = UsageRepository(
     liveSource: source, sessionLogSource: CodexSessionLogUsageSource(sessionsRootURL: profile.sessionsURL),
     cacheStore: SnapshotCacheStore(cacheURL: root.appendingPathComponent("usage.json")),
@@ -97,10 +116,14 @@ precondition(controller.refreshTimer?.timeInterval == 300, "Background timer mus
 controller.refreshNow()
 settle()
 precondition(source.count == 1, "Manual refresh must pull immediately")
+precondition(controller.statusItem.button?.toolTip == nil, "Render must never re-introduce a sticky status bar toolTip")
 
 // Make the controller eligible, so its throttle cannot hide unwanted callbacks.
 controller.lastRefreshStartAt = Date().addingTimeInterval(-301)
-controller.menuWillOpen(NSMenu())
+controller.popoverWillOpen()
+controller.updatePopoverSize()
+controller.closePopover()
+precondition(controller.outsideClickMonitor == nil, "Closing popover must remove global outside-click monitor")
 controller.openUsageHistory()
 controller.usageHistoryWindowController?.close()
 controller.installWakeObserver()
@@ -108,7 +131,7 @@ NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification
 controller.installAuthFileWatcher(for: profile)
 try Data("{\"changed\":true}".utf8).write(to: profile.authURL, options: .atomic)
 RunLoop.main.run(until: Date().addingTimeInterval(1.1))
-precondition(source.count == 1, "Menu, history, wake and auth writes must not pull usage")
+precondition(source.count == 1, "Popover, history, wake and auth writes must not pull usage")
 
 controller.refreshTimer?.fire()
 settle()
@@ -127,6 +150,7 @@ settle()
 precondition(source.count == 5, "Forced refreshes must coalesce while a fetch is running; timer must not queue")
 let remaining = controller.refreshTimer!.fireDate.timeIntervalSinceNow
 precondition((295...300).contains(remaining), "Manual refresh must restart the five-minute wait")
+
 controller.tokenUsageSource = CodexTokenUsageSource(sessionsRootURL: profile.sessionsURL)
 controller.tokenReportStore = TokenUsageReportCacheStore(cacheURL: root.appendingPathComponent("tokens.json"))
 controller.refreshTokenReportIfNeeded(force: false)
@@ -144,6 +168,7 @@ precondition(controller.tokenReportTask == nil && controller.tokenReport != nil,
     }
     precondition(controller.claudeUsageTask == nil, "Claude refresh did not complete")
 }
+
 settleClaude()
 let observed = Date()
 let payload = "{\"rate_limits\":{\"five_hour\":{\"used_percentage\":5,\"resets_at\":\(observed.timeIntervalSince1970 + 3600)}}}"
@@ -153,11 +178,9 @@ controller.refreshClaudeAccountUsage(force: true)
 settleClaude()
 precondition(controller.claudeSnapshot == fresh && controller.claudeUsageError == nil,
              "Account usage must populate Claude bars without statusline activity")
-precondition(!controller.claudeFiveHourItem.isHidden && controller.claudeWeeklyItem.isHidden,
-             "Received quota must be visible and unknown windows must stay unavailable")
 let calls = controller.claudeUsageSource.calls
-controller.menuWillOpen(NSMenu())
-precondition(controller.claudeUsageSource.calls == calls, "Opening the menu must not request account usage")
+controller.popoverWillOpen()
+precondition(controller.claudeUsageSource.calls == calls, "Opening the popover must not request account usage")
 controller.claudeSnapshot = try ClaudeCodeStatusLine.capture(Data(payload.utf8), now: observed.addingTimeInterval(-200))
 controller.refreshClaudeAccountUsage()
 precondition(controller.claudeUsageTask == nil, "A recent Claude reading must not be refetched by the timer")
@@ -171,20 +194,16 @@ settleClaude()
 precondition(controller.claudeSnapshot?.fiveHour?.usedPercent == 5 && controller.claudeSnapshot?.isStale == true,
              "An account failure must retain the last valid quota")
 let failure = controller.claudeUsageError
-controller.menuWillOpen(NSMenu())
+controller.popoverWillOpen()
 precondition(failure != nil && controller.claudeUsageError == failure,
-             "Opening the menu must preserve the account failure")
+             "Opening the popover must preserve the account failure")
 precondition(controller.claudeSnapshot?.isStale == true, "A failed reading must remain marked stale")
 
-precondition(controller.menu.items.first === controller.headerItem && controller.statusItem.button?.toolTip == "Codex usage",
-             "Codex must be the default primary provider")
-controller.selectPrimary(controller.claudePrimaryItem)
-precondition(controller.menu.items.first === controller.claudeSectionItem && controller.statusItem.button?.toolTip == "Claude Code usage",
-             "The primary provider must lead the menu and own the menu-bar icon")
-precondition(controller.claudePrimaryItem.state == .on && !controller.claudeToggleItem.isEnabled && controller.codexToggleItem.isEnabled,
-             "The primary provider cannot be unticked")
+controller.selectPrimary(.claude)
+precondition(controller.primaryProvider == .claude && controller.statusItem.button?.toolTip == nil,
+             "Primary provider selection must work without sticky toolTip")
 
-controller.toggleCodex()
+controller.toggleProvider(.codex)
 let codexCalls = source.count
 controller.refreshNow()
 controller.refreshTimer?.fire()
@@ -192,66 +211,81 @@ settle()
 settleClaude()
 precondition(source.count == codexCalls && controller.tokenReportTask == nil,
              "Disabled Codex must not fetch usage or scan tokens")
-precondition(controller.headerItem.isHidden && controller.primaryUsageItem.isHidden && controller.accountsItem.isHidden,
-             "Disabled Codex must hide its usage and account controls")
-precondition(!controller.claudeSectionItem.isHidden && controller.sectionSeparator.isHidden,
-             "Claude-only mode must keep its section without a dangling separator")
 controller.refreshTimer?.fireDate = Date().addingTimeInterval(60)
 controller.refreshNow()
 settleClaude()
 precondition(controller.refreshTimer!.fireDate.timeIntervalSinceNow > 290,
              "A Claude-only manual refresh must restart the five-minute wait")
+
 let reopened = AppController(accountStore: controller.accountStore, defaults: UserDefaults(suiteName: suiteName)!)
-precondition(reopened.primaryProvider == .claude && !reopened.codexEnabled && reopened.claudeEnabled,
+precondition(reopened.primaryProvider == .claude && !reopened.codexEnabled && reopened.claudeEnabled && reopened.agyEnabled,
              "Provider preferences must survive reopening")
 
-controller.selectPrimary(controller.codexPrimaryItem)
+controller.selectPrimary(.codex)
 settle()
-precondition(source.count == codexCalls + 1 && !controller.primaryUsageItem.isHidden && controller.menu.items.first === controller.headerItem,
-             "Making Codex primary must enable it, fetch immediately and move it first")
+precondition(source.count == codexCalls + 1, "Making Codex primary must enable and fetch immediately")
 precondition(controller.claudeEnabled, "The previous primary keeps its own tick")
-controller.toggleClaude()
+
+controller.toggleProvider(.claude)
 let claudeCalls = controller.claudeUsageSource.calls
 controller.refreshNow()
 settle()
 controller.refreshClaudeUsage()
 controller.refreshClaudeAccountUsage(force: true)
 RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-precondition(controller.claudeUsageSource.calls == claudeCalls && controller.claudeSectionItem.isHidden && controller.claudeFiveHourItem.isHidden,
-             "Unticked Claude must stop requests and hide its section")
+precondition(controller.claudeUsageSource.calls == claudeCalls,
+             "Unticked Claude must stop requests")
 controller.claudeUsageSource.failure = false
-controller.toggleClaude()
+controller.toggleProvider(.claude)
 settleClaude()
-precondition(controller.claudeUsageSource.calls == claudeCalls + 1 && !controller.claudeSectionItem.isHidden,
+precondition(controller.claudeUsageSource.calls == claudeCalls + 1,
              "Re-enabling Claude must immediately fetch and restore Claude")
 
 let idleDeadline = Date().addingTimeInterval(2)
 while controller.tokenReportTask != nil && Date() < idleDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
-controller.selectPrimary(controller.claudePrimaryItem) // Codex returns to its unticked state
+controller.selectPrimary(.claude)
 let paused = PausedTokenSource()
 let cancelledCache = root.appendingPathComponent("cancelled-tokens.json")
 controller.tokenUsageSource = paused
 controller.tokenReportStore = TokenUsageReportCacheStore(cacheURL: cancelledCache)
 controller.tokenReport = nil
-controller.toggleCodex() // Ticking Codex starts a token scan
+controller.toggleProvider(.codex)
 let scanDeadline = Date().addingTimeInterval(2)
 while !paused.didStart && Date() < scanDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
 precondition(paused.didStart, "Token scan did not start")
-controller.toggleCodex()
+controller.toggleProvider(.codex)
 paused.resume.signal()
 let finishDeadline = Date().addingTimeInterval(2)
 while controller.tokenReportTask != nil && Date() < finishDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
 precondition(controller.tokenReportTask == nil && controller.tokenReport == nil && !FileManager.default.fileExists(atPath: cancelledCache.path),
              "Disabling during a token scan must discard its result and report-cache write")
 
-controller.selectPrimary(controller.codexPrimaryItem)
+// Verify Antigravity local token scan cancellation on disable
+let pausedAgy = PausedTokenSource()
+let cancelledAgyCache = root.appendingPathComponent("cancelled-agy.json")
+controller.agyTokenSource = pausedAgy
+controller.agyTokenStore = TokenUsageReportCacheStore(cacheURL: cancelledAgyCache)
+controller.agyTokenReport = nil
+controller.toggleProvider(.antigravity) // disable
+controller.toggleProvider(.antigravity) // enable -> starts scan
+let agyScanDeadline = Date().addingTimeInterval(2)
+while !pausedAgy.didStart && Date() < agyScanDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+precondition(pausedAgy.didStart, "Antigravity token scan did not start")
+controller.toggleProvider(.antigravity) // disable mid-scan
+pausedAgy.resume.signal()
+let agyFinishDeadline = Date().addingTimeInterval(2)
+while controller.agyTokenTask != nil && Date() < agyFinishDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+precondition(controller.agyTokenTask == nil && controller.agyTokenReport == nil && !FileManager.default.fileExists(atPath: cancelledAgyCache.path),
+             "Disabling Antigravity during a scan must discard its result and cache write")
+
+controller.selectPrimary(.codex)
 settle()
 controller.claudeUsageSource.delay = .milliseconds(100)
 let beforeCancellation = controller.claudeUsageSource.calls
 controller.refreshClaudeAccountUsage(force: true)
 RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-controller.toggleClaude()
-controller.toggleClaude()
+controller.toggleProvider(.claude)
+controller.toggleProvider(.claude)
 settleClaude()
 precondition(controller.claudeUsageSource.calls == beforeCancellation + 2 && controller.claudeUsageError == nil,
              "Disabling and immediately re-enabling Claude must discard cancellation errors and fetch again")
@@ -267,4 +301,4 @@ while IFS= read -r file; do
 done < <(rg --files "$ROOT_DIR/Sources/CodexPeek" -g '*.swift')
 swiftc -swift-version 6 "${sources[@]}" "$CHECK_DIR/AppController.swift" "$CHECK_DIR/AccountProfiles.swift" \
   "$CHECK_DIR/main.swift" -framework AppKit -framework ServiceManagement -o "$CHECK_DIR/check"
-CLAUDE_CONFIG_DIR="$CHECK_DIR/claude" "$CHECK_DIR/check" "$CHECK_DIR"
+CLAUDE_CONFIG_DIR="$CHECK_DIR/claude" AGY_CONFIG_DIR="$CHECK_DIR/agy" AGY_BRAIN_ROOTS="$CHECK_DIR/agy-brain" "$CHECK_DIR/check" "$CHECK_DIR"

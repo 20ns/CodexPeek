@@ -41,15 +41,16 @@ enum PriceFeed {
         try? JSONEncoder().encode(Snapshot(fetchedAt: now, rates: rates)).write(to: cacheURL, options: .atomic)
     }
 
-    /// Keeps first-party Anthropic and OpenAI chat models with sane per-token prices.
+    /// Keeps first-party Anthropic, OpenAI, and Google Gemini chat models with sane per-token prices.
     static func parse(_ data: Data) -> [String: Rates]? {
         guard let models = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
         var rates: [String: Rates] = [:]
-        for (id, value) in models {
+        for (rawID, value) in models {
             guard let entry = value as? [String: Any],
-                  ["anthropic", "openai"].contains(entry["litellm_provider"] as? String),
-                  ["chat", "responses"].contains(entry["mode"] as? String),
-                  id.hasPrefix("claude-") || id.hasPrefix("gpt-"),
+                  ["anthropic", "openai", "gemini", "vertex_ai-language-models"].contains(entry["litellm_provider"] as? String),
+                  ["chat", "responses"].contains(entry["mode"] as? String) else { continue }
+            let id = rawID.hasPrefix("gemini/") ? String(rawID.dropFirst("gemini/".count)) : rawID
+            guard id.hasPrefix("claude-") || id.hasPrefix("gpt-") || id.hasPrefix("gemini-"),
                   let input = perMillion(entry["input_cost_per_token"]),
                   let output = perMillion(entry["output_cost_per_token"]) else { continue }
             let cached = perMillion(entry["cache_read_input_token_cost"]) ?? input // no cache price: no cache discount (e.g. Pro models)

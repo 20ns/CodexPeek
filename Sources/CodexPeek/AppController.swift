@@ -1,71 +1,38 @@
 @preconcurrency import AppKit
 import Foundation
+import SwiftUI
 
 @MainActor
-final class AppController: NSObject, NSMenuDelegate {
+final class AppController: NSObject, NSPopoverDelegate {
     private static let refreshInterval: TimeInterval = 5 * 60
     private static let refreshTolerance: TimeInterval = 30
 
     private let accountStore: AccountProfileStore
     private let defaults: UserDefaults
-    private enum Provider: String { case codex, claude }
-    private var primaryProvider: Provider { Provider(rawValue: defaults.string(forKey: "primaryProvider") ?? "") ?? .codex }
+    private var primaryProvider: PopoverProvider {
+        PopoverProvider(rawValue: defaults.string(forKey: "primaryProvider") ?? "") ?? .codex
+    }
     // The primary provider is always tracked; the stored flag remembers the choice for when it is secondary.
     private var codexEnabled: Bool { primaryProvider == .codex || defaults.bool(forKey: "codexEnabled") }
     private var claudeEnabled: Bool { primaryProvider == .claude || defaults.bool(forKey: "claudeEnabled") }
+    private var agyEnabled: Bool { primaryProvider == .antigravity || defaults.bool(forKey: "agyEnabled") }
+    private var showAccountEmail: Bool { defaults.bool(forKey: "showAccountEmail") }
+
     private let statusItem: NSStatusItem
-    private let menu = NSMenu()
-    private let accountsMenu = NSMenu(title: "Accounts")
-    private let providersMenu = NSMenu(title: "Providers")
+    private let popover = NSPopover()
+    private let popoverViewModel = PopoverViewModel()
+    private var popoverHostController: NSHostingController<UsagePopoverView>?
+    private var outsideClickMonitor: Any?
+
     private let iconRenderer = StatusIconRenderer()
     private let launchAtLoginController = LaunchAtLoginController()
     private let codexAppOpener = CodexAppOpener()
     private let codexDesktopAuthStore = CodexDesktopAuthStore()
     private let authFileWatcher = AuthFileWatcher()
     private let claudeUsageWatcher = AuthFileWatcher()
+    private let agyUsageWatcher = AuthFileWatcher()
     private let claudeUsageSource = ClaudeCodeUsageSource()
     private var claudeUsageTask: Task<Void, Never>?
-
-    private let headerView = HeaderMenuItemView()
-    private let primaryUsageView = UsageMenuItemView()
-    private let secondaryUsageView = UsageMenuItemView()
-    private let sparkUsageView = CompactSupplementalUsageMenuItemView()
-    private let tokenCostView = TokenCostMenuItemView()
-    private let statusView = StatusMenuItemView()
-    private let claudeSectionView = MenuSectionHeaderView()
-    private let claudeFiveHourView = ClaudeUsageMenuItemView()
-    private let claudeWeeklyView = ClaudeUsageMenuItemView()
-    private let claudeModelWeeklyView = ClaudeUsageMenuItemView()
-    private let claudeTokenCostView = TokenCostMenuItemView()
-    private let claudeStatusView = StatusMenuItemView()
-
-    private let headerItem = NSMenuItem()
-    private let primaryUsageItem = NSMenuItem()
-    private let secondaryUsageItem = NSMenuItem()
-    private let sparkUsageItem = NSMenuItem()
-    private let tokenCostItem = NSMenuItem()
-    private let statusItemView = NSMenuItem()
-    private let claudeSectionItem = NSMenuItem()
-    private let claudeFiveHourItem = NSMenuItem()
-    private let claudeWeeklyItem = NSMenuItem()
-    private let claudeModelWeeklyItem = NSMenuItem()
-    private let claudeTokenCostItem = NSMenuItem()
-    private let claudeStatusItem = NSMenuItem()
-    private let enableClaudeItem = NSMenuItem(title: "Enable Claude local usage", action: #selector(enableClaudeLocalUsage), keyEquivalent: "")
-    private let accountsItem = NSMenuItem(title: "Accounts", action: nil, keyEquivalent: "")
-    private let launchAtLoginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
-    private let logoutItem = NSMenuItem(title: "Log Out", action: #selector(logOut), keyEquivalent: "")
-    private let openCodexItem = NSMenuItem(title: "Open Codex", action: #selector(openCodex), keyEquivalent: "")
-    private let historyItem = NSMenuItem(title: "Usage History…", action: #selector(openUsageHistory), keyEquivalent: "")
-    private let providersItem = NSMenuItem(title: "Providers", action: nil, keyEquivalent: "")
-    private let codexPrimaryItem = NSMenuItem(title: "Codex", action: #selector(selectPrimary), keyEquivalent: "")
-    private let claudePrimaryItem = NSMenuItem(title: "Claude Code", action: #selector(selectPrimary), keyEquivalent: "")
-    private let codexToggleItem = NSMenuItem(title: "Codex", action: #selector(toggleCodex), keyEquivalent: "")
-    private let claudeToggleItem = NSMenuItem(title: "Claude Code", action: #selector(toggleClaude), keyEquivalent: "")
-    private let codexHeaderSeparator = NSMenuItem.separator()
-    private let sectionSeparator = NSMenuItem.separator()
-    private let removeAccountItem = NSMenuItem(title: "Remove Current Account…", action: #selector(removeCurrentAccount), keyEquivalent: "")
-    private let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
 
     private var repository: UsageRepository?
     private var tokenUsageSource: TokenUsageSource?
@@ -76,11 +43,28 @@ final class AppController: NSObject, NSMenuDelegate {
     private let claudeTokenStore = TokenUsageReportCacheStore(
         cacheURL: AccountProfileStore.baseSupportURL().appendingPathComponent("claude-token-report.json")
     )
+    private var agyTokenSource: TokenUsageSource = AntigravityTokenUsageSource(indexStore: TokenUsageSessionIndexStore(
+        cacheURL: AccountProfileStore.baseSupportURL().appendingPathComponent("antigravity-token-index.json")
+    ))
+    private var agyTokenStore: TokenUsageReportStoring = TokenUsageReportCacheStore(
+        cacheURL: AccountProfileStore.baseSupportURL().appendingPathComponent("antigravity-token-report.json")
+    )
+
     private var claudeTokenReport: TokenUsageReport?
     private var claudeTokenTask: Task<Void, Never>?
     private var pendingClaudeTokenRefresh = false
     private var lastClaudeTokenAttempt: Date?
     private var claudeTokenFailed = false
+
+    private var agySnapshot: AntigravityUsageSnapshot?
+    private var agyBridgeEnabled = false
+    private var agyUsageError: String?
+    private var agyTokenReport: TokenUsageReport?
+    private var agyTokenTask: Task<Void, Never>?
+    private var pendingAgyTokenRefresh = false
+    private var lastAgyTokenAttempt: Date?
+    private var agyTokenFailed = false
+
     private var refreshTimer: Timer?
     private var refreshTask: Task<Void, Never>?
     private var pendingRefreshReason: String?
@@ -110,17 +94,24 @@ final class AppController: NSObject, NSMenuDelegate {
     init(accountStore: AccountProfileStore, defaults: UserDefaults = .standard) {
         self.accountStore = accountStore
         self.defaults = defaults
-        defaults.register(defaults: ["codexEnabled": true, "claudeEnabled": true])
+        defaults.register(defaults: [
+            "codexEnabled": true,
+            "claudeEnabled": true,
+            "agyEnabled": true,
+            "showAccountEmail": false
+        ])
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
     }
 
     func start() {
         claudeTokenReport = try? claudeTokenStore.load()
+        agyTokenReport = try? agyTokenStore.load()
         configureStatusItem()
-        configureMenu()
+        configurePopover()
         installWakeObserver()
         watchClaudeUsage()
+        watchAgyUsage()
         scheduleRefreshTimer()
 
         do {
@@ -136,7 +127,10 @@ final class AppController: NSObject, NSMenuDelegate {
         render()
 
         if let executableURL = Bundle.main.executableURL {
-            Task.detached(priority: .utility) { ClaudeCodeStatusLine.updateHelperIfInstalled(executableURL: executableURL) }
+            Task.detached(priority: .utility) {
+                ClaudeCodeStatusLine.updateHelperIfInstalled(executableURL: executableURL)
+                AntigravityStatusLine.updateHelperIfInstalled(executableURL: executableURL)
+            }
         }
         Task.detached(priority: .utility) {
             while !Task.isCancelled {
@@ -146,9 +140,7 @@ final class AppController: NSObject, NSMenuDelegate {
         }
 
         Task { [weak self] in
-            guard let self else {
-                return
-            }
+            guard let self else { return }
 
             if let repository = self.repository, let cached = await repository.loadCachedSnapshot() {
                 self.snapshot = cached
@@ -160,10 +152,12 @@ final class AppController: NSObject, NSMenuDelegate {
             self.refreshClaudeTokenReportIfNeeded(force: false)
             self.refreshClaudeUsage()
             self.refreshClaudeAccountUsage()
+            self.refreshAgyUsage()
+            self.refreshAgyTokenReportIfNeeded(force: false)
         }
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
+    func popoverWillOpen() {
         do {
             if codexEnabled { try syncAccountStateFromDisk() }
         } catch {
@@ -171,6 +165,56 @@ final class AppController: NSObject, NSMenuDelegate {
         }
 
         refreshClaudeUsage()
+        refreshAgyUsage()
+        render()
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        stopOutsideClickMonitor()
+    }
+
+    @objc private func togglePopover(_ sender: AnyObject?) {
+        if popover.isShown {
+            closePopover()
+            return
+        }
+        guard let button = statusItem.button else { return }
+        popoverWillOpen()
+        updatePopoverSize()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+        startOutsideClickMonitor()
+    }
+
+    private func closePopover() {
+        popover.performClose(nil)
+        stopOutsideClickMonitor()
+    }
+
+    private func startOutsideClickMonitor() {
+        stopOutsideClickMonitor()
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.popover.isShown else { return }
+                self.closePopover()
+            }
+        }
+    }
+
+    private func stopOutsideClickMonitor() {
+        if let outsideClickMonitor {
+            NSEvent.removeMonitor(outsideClickMonitor)
+            self.outsideClickMonitor = nil
+        }
+    }
+
+    private func updatePopoverSize() {
+        guard let host = popoverHostController else { return }
+        host.view.layoutSubtreeIfNeeded()
+        let fitting = host.view.fittingSize
+        if fitting.height > 80 {
+            popover.contentSize = NSSize(width: UsagePopoverView.popoverWidth, height: fitting.height)
+        }
     }
 
     @objc private func refreshNow() {
@@ -179,22 +223,34 @@ final class AppController: NSObject, NSMenuDelegate {
         refreshClaudeTokenReportIfNeeded(force: true)
         refreshClaudeUsage()
         refreshClaudeAccountUsage(force: true)
+        refreshAgyUsage()
+        refreshAgyTokenReportIfNeeded(force: true)
     }
 
-    @objc private func selectPrimary(_ sender: NSMenuItem) {
-        updateProviders { defaults.set(sender === claudePrimaryItem ? Provider.claude.rawValue : Provider.codex.rawValue, forKey: "primaryProvider") }
+    func selectPrimary(_ provider: PopoverProvider) {
+        guard PopoverProvider.menuBarProviders.contains(provider) else { return }
+        updateProviders { defaults.set(provider.rawValue, forKey: "primaryProvider") }
     }
 
-    @objc private func toggleCodex() {
-        updateProviders { defaults.set(!defaults.bool(forKey: "codexEnabled"), forKey: "codexEnabled") }
+    func toggleProvider(_ provider: PopoverProvider) {
+        guard primaryProvider != provider else { return }
+        switch provider {
+        case .codex:
+            updateProviders { defaults.set(!defaults.bool(forKey: "codexEnabled"), forKey: "codexEnabled") }
+        case .claude:
+            updateProviders { defaults.set(!defaults.bool(forKey: "claudeEnabled"), forKey: "claudeEnabled") }
+        case .antigravity:
+            updateProviders { defaults.set(!defaults.bool(forKey: "agyEnabled"), forKey: "agyEnabled") }
+        }
     }
 
-    @objc private func toggleClaude() {
-        updateProviders { defaults.set(!defaults.bool(forKey: "claudeEnabled"), forKey: "claudeEnabled") }
+    private func toggleShowAccountEmail() {
+        defaults.set(!showAccountEmail, forKey: "showAccountEmail")
+        render()
     }
 
     private func updateProviders(_ change: () -> Void) {
-        let wasCodex = codexEnabled, wasClaude = claudeEnabled
+        let wasCodex = codexEnabled, wasClaude = claudeEnabled, wasAgy = agyEnabled
         change()
         if codexEnabled != wasCodex {
             if codexEnabled {
@@ -224,11 +280,21 @@ final class AppController: NSObject, NSMenuDelegate {
                 pendingClaudeTokenRefresh = false
             }
         }
-        layoutMenu()
+        if agyEnabled != wasAgy {
+            if agyEnabled {
+                watchAgyUsage()
+                refreshAgyUsage()
+                refreshAgyTokenReportIfNeeded(force: true)
+            } else {
+                agyUsageWatcher.stop()
+                agyTokenTask?.cancel()
+                pendingAgyTokenRefresh = false
+            }
+        }
         render()
     }
 
-    @objc private func enableClaudeLocalUsage() {
+    private func enableClaudeLocalUsage() {
         do {
             guard let executableURL = Bundle.main.executableURL else { return }
             try ClaudeCodeStatusLine.install(executableURL: executableURL)
@@ -240,7 +306,32 @@ final class AppController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func openUsageHistory() {
+    private func enableAgyStatusLine() {
+        do {
+            guard let executableURL = Bundle.main.executableURL else { return }
+            try AntigravityStatusLine.install(executableURL: executableURL)
+            agyUsageError = nil
+            watchAgyUsage()
+            refreshAgyUsage()
+        } catch {
+            agyUsageError = "Could not enable Antigravity statusline bridge"
+            render()
+        }
+    }
+
+    private func openAgyCLI() {
+        closePopover()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = [
+            "-e", "tell application \"Terminal\" to activate",
+            "-e", "tell application \"Terminal\" to do script \"agy\""
+        ]
+        try? process.run()
+    }
+
+    func openUsageHistory() {
+        closePopover()
         if usageHistoryWindowController == nil {
             usageHistoryWindowController = UsageHistoryWindowController(
                 onRefresh: { [weak self] in self?.refreshNow() },
@@ -250,13 +341,14 @@ final class AppController: NSObject, NSMenuDelegate {
         usageHistoryWindowController?.show(
             report: tokenReport,
             claudeReport: claudeTokenReport,
+            antigravityReport: agyTokenReport,
             planHistory: planHistory,
             snapshot: snapshot,
             accountPlan: activeAccountSnapshot?.planType ?? .unknown
         )
     }
 
-    @objc private func toggleLaunchAtLogin() {
+    private func toggleLaunchAtLogin() {
         do {
             try launchAtLoginController.setEnabled(!launchAtLoginController.isEnabled)
             render()
@@ -266,7 +358,7 @@ final class AppController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func openCodex() {
+    private func openCodex() {
         guard let activeProfile else {
             refreshState = .failed("Missing active account profile")
             render()
@@ -285,6 +377,7 @@ final class AppController: NSObject, NSMenuDelegate {
             return
         }
 
+        closePopover()
         Task { [weak self] in
             do {
                 try await self?.codexAppOpener.openCodex(relaunchIfRunning: shouldRestart)
@@ -297,25 +390,21 @@ final class AppController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func copyDebugInfo() {
+    private func copyDebugInfo() {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(debugSummary(), forType: .string)
-        headerView.toolTip = "Debug info copied"
+        popoverViewModel.copiedDebugFeedback = true
         Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
+            try? await Task.sleep(for: .seconds(1.8))
             await MainActor.run {
-                self?.headerView.toolTip = nil
+                self?.popoverViewModel.copiedDebugFeedback = false
             }
         }
     }
 
-    @objc private func selectAccountProfile(_ sender: NSMenuItem) {
-        guard refreshTask == nil,
-              let profileID = sender.representedObject as? String else {
-            return
-        }
-
+    private func selectAccountProfile(id profileID: String) {
+        guard refreshTask == nil else { return }
         do {
             let state = try accountStore.setActiveProfileID(profileID)
             updateAccountState(state)
@@ -330,11 +419,8 @@ final class AppController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func addAccount() {
-        guard refreshTask == nil else {
-            return
-        }
-
+    private func addAccount() {
+        guard refreshTask == nil else { return }
         do {
             let state = try accountStore.createManagedProfile(activate: true)
             updateAccountState(state)
@@ -351,11 +437,8 @@ final class AppController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func signInCurrentAccount() {
-        guard refreshTask == nil, let activeProfile else {
-            return
-        }
-
+    private func signInCurrentAccount() {
+        guard refreshTask == nil, let activeProfile else { return }
         do {
             try startLogin(for: activeProfile)
         } catch {
@@ -364,19 +447,15 @@ final class AppController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func logOut() {
-        guard refreshTask == nil, let activeProfile else {
-            return
-        }
+    private func logOut() {
+        guard refreshTask == nil, let activeProfile else { return }
 
         refreshState = .refreshing
         render()
 
         let environment = codexEnvironment(for: activeProfile)
         refreshTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
+            guard let self else { return }
 
             var shouldRefreshAfterLogout = false
             defer {
@@ -418,23 +497,22 @@ final class AppController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func removeCurrentAccount() {
+    private func removeCurrentAccount() {
         guard refreshTask == nil,
               let activeProfile,
               activeProfile.kind == .managed else {
             return
         }
 
+        let label = privacySafeProfileLabel(for: activeProfile, snapshot: activeAccountSnapshot)
         let alert = NSAlert()
-        alert.messageText = "Remove \(activeProfile.displayName)?"
+        alert.messageText = "Remove \(label)?"
         alert.informativeText = "This removes the saved CodexPeek account profile from this Mac. You can add it again later by signing in."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
 
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            return
-        }
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         do {
             _ = try codexDesktopAuthStore.restoreDefaultIfSystemAuthOwned(
@@ -456,72 +534,60 @@ final class AppController: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc private func quit() {
+    private func quit() {
         NSApplication.shared.terminate(nil)
     }
 
     private func configureStatusItem() {
-        statusItem.button?.imagePosition = .imageOnly
-        statusItem.menu = menu
+        guard let button = statusItem.button else { return }
+        button.imagePosition = .imageOnly
+        // Never set `toolTip` on NSStatusBarButton: in LSUIElement menu bar apps, macOS's
+        // NSToolTipManager can leave the floating tooltip window stuck across all Spaces until clicked.
+        button.toolTip = nil
+        button.target = self
+        button.action = #selector(togglePopover(_:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
-    private func configureMenu() {
-        menu.delegate = self
+    func configurePopover() {
+        popover.behavior = .transient
+        popover.animates = true
+        popover.delegate = self
 
-        headerItem.view = headerView
-        primaryUsageItem.view = primaryUsageView
-        secondaryUsageItem.view = secondaryUsageView
-        sparkUsageItem.view = sparkUsageView
-        tokenCostItem.view = tokenCostView
-        statusItemView.view = statusView
-        claudeSectionItem.view = claudeSectionView
-        claudeFiveHourItem.view = claudeFiveHourView
-        claudeWeeklyItem.view = claudeWeeklyView
-        claudeModelWeeklyItem.view = claudeModelWeeklyView
-        claudeTokenCostItem.view = claudeTokenCostView
-        claudeStatusItem.view = claudeStatusView
-        accountsItem.submenu = accountsMenu
-        providersItem.submenu = providersMenu
-        providersMenu.autoenablesItems = false
-        for item in [codexPrimaryItem, claudePrimaryItem, codexToggleItem, claudeToggleItem] {
-            item.target = self
-        }
-        providersMenu.items = [
-            .sectionHeader(title: "Menu Bar Icon"), codexPrimaryItem, claudePrimaryItem,
-            .separator(),
-            .sectionHeader(title: "Show in Menu"), codexToggleItem, claudeToggleItem
-        ]
+        let host = NSHostingController(rootView: UsagePopoverView(vm: popoverViewModel))
+        host.sizingOptions = [.preferredContentSize]
+        popoverHostController = host
+        popover.contentViewController = host
 
-        launchAtLoginItem.target = self
-        logoutItem.target = self
-        openCodexItem.target = self
-        historyItem.target = self
-        removeAccountItem.target = self
-        quitItem.target = self
-        enableClaudeItem.target = self
-        headerView.onRefresh = { [weak self] in
-            self?.refreshNow()
+        popoverViewModel.onRefreshAll = { [weak self] in self?.refreshNow() }
+        popoverViewModel.onRefreshClaude = { [weak self] in
+            self?.refreshClaudeUsage()
+            self?.refreshClaudeAccountUsage(force: true)
+            self?.refreshClaudeTokenReportIfNeeded(force: true)
         }
-        claudeSectionView.onRefresh = { [weak self] in
-            self?.refreshNow()
+        popoverViewModel.onRefreshAgy = { [weak self] in
+            self?.refreshAgyUsage()
+            self?.refreshAgyTokenReportIfNeeded(force: true)
         }
-        headerView.onCopyDebugInfo = { [weak self] in
-            self?.copyDebugInfo()
+        popoverViewModel.onOpenHistory = { [weak self] in self?.openUsageHistory() }
+        popoverViewModel.onSelectPrimary = { [weak self] in self?.selectPrimary($0) }
+        popoverViewModel.onToggleProvider = { [weak self] in self?.toggleProvider($0) }
+        popoverViewModel.onToggleShowEmail = { [weak self] in self?.toggleShowAccountEmail() }
+        popoverViewModel.onToggleLaunchAtLogin = { [weak self] in self?.toggleLaunchAtLogin() }
+        popoverViewModel.onCopyDebugInfo = { [weak self] in self?.copyDebugInfo() }
+        popoverViewModel.onSelectCodexAccount = { [weak self] in self?.selectAccountProfile(id: $0) }
+        popoverViewModel.onAddCodexAccount = { [weak self] in self?.addAccount() }
+        popoverViewModel.onSignInCodexAccount = { [weak self] in self?.signInCurrentAccount() }
+        popoverViewModel.onRemoveCodexAccount = { [weak self] in self?.removeCurrentAccount() }
+        popoverViewModel.onOpenCodex = { [weak self] in self?.openCodex() }
+        popoverViewModel.onLogOutCodex = { [weak self] in self?.logOut() }
+        popoverViewModel.onEnableClaudeBridge = { [weak self] in self?.enableClaudeLocalUsage() }
+        popoverViewModel.onEnableAgyBridge = { [weak self] in self?.enableAgyStatusLine() }
+        popoverViewModel.onOpenAgyCLI = { [weak self] in self?.openAgyCLI() }
+        popoverViewModel.onQuit = { [weak self] in self?.quit() }
+        popoverViewModel.onPreferredSizeChange = { [weak self] in
+            DispatchQueue.main.async { self?.updatePopoverSize() }
         }
-
-        layoutMenu()
-    }
-
-    /// The primary provider's section leads the menu.
-    private func layoutMenu() {
-        let codex = [headerItem, codexHeaderSeparator, primaryUsageItem, secondaryUsageItem, sparkUsageItem, tokenCostItem, statusItemView]
-        let claude = [claudeSectionItem, claudeFiveHourItem, claudeWeeklyItem, claudeModelWeeklyItem, claudeTokenCostItem, claudeStatusItem, enableClaudeItem]
-        let sections = primaryProvider == .codex ? codex + [sectionSeparator] + claude : claude + [sectionSeparator] + codex
-        menu.items = sections + [
-            .separator(), historyItem, providersItem, accountsItem,
-            .separator(), launchAtLoginItem, logoutItem, openCodexItem,
-            .separator(), quitItem
-        ]
     }
 
     private func installWakeObserver() {
@@ -532,6 +598,7 @@ final class AppController: NSObject, NSMenuDelegate {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshClaudeUsage()
+                self?.refreshAgyUsage()
             }
         }
     }
@@ -565,6 +632,8 @@ final class AppController: NSObject, NSMenuDelegate {
                 self?.refreshClaudeTokenReportIfNeeded(force: false)
                 self?.refreshClaudeUsage()
                 self?.refreshClaudeAccountUsage()
+                self?.refreshAgyUsage()
+                self?.refreshAgyTokenReportIfNeeded(force: false)
             }
         }
         refreshTimer?.tolerance = Self.refreshTolerance
@@ -580,9 +649,7 @@ final class AppController: NSObject, NSMenuDelegate {
             return
         }
 
-        guard let repository, let activeProfile else {
-            return
-        }
+        guard let repository, let activeProfile else { return }
         if refreshTask != nil {
             if force { pendingRefreshReason = reason }
             return
@@ -602,9 +669,7 @@ final class AppController: NSObject, NSMenuDelegate {
         render()
 
         refreshTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
+            guard let self else { return }
 
             var recoveredProfile: AccountProfile?
 
@@ -626,9 +691,7 @@ final class AppController: NSObject, NSMenuDelegate {
 
             do {
                 let snapshot = try await repository.refresh()
-                guard !Task.isCancelled, self.codexEnabled, self.activeProfile?.id == profileID else {
-                    return
-                }
+                guard !Task.isCancelled, self.codexEnabled, self.activeProfile?.id == profileID else { return }
                 if self.shouldAttemptDuplicateProfileRecovery(for: activeProfile, snapshot: snapshot),
                    let candidate = await self.recoverDuplicateProfile(from: activeProfile) {
                     self.snapshot = nil
@@ -643,9 +706,7 @@ final class AppController: NSObject, NSMenuDelegate {
                 self.refreshState = .idle
                 try self.syncAccountStateFromDisk()
             } catch {
-                guard !Task.isCancelled, self.codexEnabled, self.activeProfile?.id == profileID else {
-                    return
-                }
+                guard !Task.isCancelled, self.codexEnabled, self.activeProfile?.id == profileID else { return }
                 if let candidate = await self.recoverDuplicateProfile(from: activeProfile) {
                     self.snapshot = nil
                     self.refreshState = .idle
@@ -654,7 +715,6 @@ final class AppController: NSObject, NSMenuDelegate {
                 }
                 self.refreshState = .failed(error.localizedDescription)
             }
-
         }
     }
 
@@ -662,18 +722,12 @@ final class AppController: NSObject, NSMenuDelegate {
         for profile: AccountProfile,
         snapshot: CodexUsageSnapshot
     ) -> Bool {
-        guard profile.kind == .managed else {
-            return false
-        }
-
+        guard profile.kind == .managed else { return false }
         return snapshot.isStale || (snapshot.primary == nil && snapshot.secondary == nil)
     }
 
     private func recoverDuplicateProfile(from failedProfile: AccountProfile) async -> AccountProfile? {
-        guard let accountState else {
-            return nil
-        }
-
+        guard let accountState else { return nil }
         let candidates = DuplicateProfileRecovery.candidateProfiles(
             from: accountState,
             activeProfile: failedProfile,
@@ -703,178 +757,135 @@ final class AppController: NSObject, NSMenuDelegate {
 
     private func render() {
         let isWeeklyExhausted = snapshot?.isWeeklyExhausted == true
-        if primaryProvider == .codex {
+        switch primaryProvider {
+        case .codex:
             statusItem.button?.image = iconRenderer.render(
                 primaryPercent: snapshot?.primary?.usedPercent,
                 secondaryPercent: snapshot?.secondary?.usedPercent,
                 refreshState: refreshState,
                 isWeeklyExhausted: isWeeklyExhausted
             )
-            statusItem.button?.toolTip = "Codex usage"
-        } else {
+            statusItem.button?.setAccessibilityLabel("Codex usage")
+        case .claude:
             statusItem.button?.image = iconRenderer.render(
                 primaryPercent: claudeSnapshot?.fiveHour?.usedPercent,
                 secondaryPercent: claudeSnapshot?.sevenDay?.usedPercent,
                 refreshState: claudeUsageTask != nil ? .refreshing : .idle,
                 isWeeklyExhausted: claudeSnapshot?.sevenDay?.isExhausted == true
             )
-            statusItem.button?.toolTip = "Claude Code usage"
-        }
-
-        headerView.update(snapshot: snapshot, refreshState: refreshState)
-
-        let sessionWindow = snapshot?.sessionWindow
-        let weeklyWindow = snapshot?.weeklyWindow
-        let hasBothWindows = sessionWindow != nil && weeklyWindow != nil
-
-        if hasBothWindows {
-            let sessionTitle = UIFormatters.rateLimitWindowTitle(for: sessionWindow, fallback: "5-hour window")
-            let weeklyTitle = UIFormatters.rateLimitWindowTitle(for: weeklyWindow, fallback: "Weekly window")
-            let overrideDetail = isWeeklyExhausted ? "Weekly limit reached • resumes after the weekly reset" : nil
-
-            primaryUsageView.update(
-                title: sessionTitle,
-                window: sessionWindow,
-                isDimmed: isWeeklyExhausted,
-                overrideDetail: overrideDetail
+            statusItem.button?.setAccessibilityLabel("Claude Code usage")
+        case .antigravity:
+            statusItem.button?.image = iconRenderer.render(
+                primaryPercent: agySnapshot?.primaryBucket?.window.usedPercent,
+                secondaryPercent: agySnapshot?.secondaryBucket?.window.usedPercent,
+                refreshState: agyTokenTask != nil ? .refreshing : .idle,
+                isWeeklyExhausted: agySnapshot?.secondaryBucket?.window.isExhausted == true
             )
-            secondaryUsageView.update(title: weeklyTitle, window: weeklyWindow)
+            statusItem.button?.setAccessibilityLabel("Antigravity usage")
+        }
+        statusItem.button?.toolTip = nil
+
+        let vm = popoverViewModel
+        vm.primaryProvider = primaryProvider
+        vm.codexEnabled = codexEnabled
+        vm.claudeEnabled = claudeEnabled
+        vm.agyEnabled = agyEnabled
+        vm.showAccountEmail = showAccountEmail
+        vm.launchAtLogin = launchAtLoginController.isEnabled
+
+        vm.codexSnapshot = snapshot
+        vm.codexTokenReport = tokenReport
+        vm.codexTokenRefreshing = tokenReportTask != nil
+        vm.codexRefreshState = refreshState
+        vm.codexAccountStatus = accountStatusMessage()
+        if let activeProfile {
+            vm.codexProfileLabel = privacySafeProfileLabel(for: activeProfile, snapshot: snapshot?.account ?? activeAccountSnapshot)
         } else {
-            let singleWindow = weeklyWindow ?? sessionWindow ?? snapshot?.primary
-            let title = UIFormatters.rateLimitWindowTitle(for: singleWindow, fallback: singleWindow?.isWeekly == true ? "Weekly window" : "Usage")
+            vm.codexProfileLabel = "Codex Account"
+        }
+        vm.codexSignedIn = activeAccountSnapshot?.isSignedIn == true
+        vm.codexCanRemoveAccount = activeProfile?.kind == .managed
+        vm.codexActionsEnabled = refreshTask == nil
+        vm.codexAccounts = buildAccountChoices()
 
-            primaryUsageView.update(
-                title: title,
-                window: singleWindow,
-                isDimmed: false,
-                overrideDetail: nil
-            )
+        vm.claudeSnapshot = claudeSnapshot
+        vm.claudeTokenReport = claudeTokenReport
+        vm.claudeTokenRefreshing = claudeTokenTask != nil
+        vm.claudeTokenFailed = claudeTokenFailed
+        vm.claudeUsageRefreshing = claudeUsageTask != nil
+        vm.claudeUsageError = claudeUsageError
+        vm.claudeBridgeEnabled = claudeBridgeEnabled
+
+        vm.agySnapshot = agySnapshot
+        vm.agyBridgeEnabled = agyBridgeEnabled
+        vm.agyUsageError = agyUsageError
+        vm.agyTokenReport = agyTokenReport
+        vm.agyModelShares = AntigravityTokenUsageSource.modelShares(from: agyTokenReport)
+        vm.agyTokenRefreshing = agyTokenTask != nil
+        vm.agyTokenFailed = agyTokenFailed
+
+        vm.ensureValidTab()
+        if popover.isShown {
+            DispatchQueue.main.async { [weak self] in self?.updatePopoverSize() }
         }
 
-        sparkUsageView.update(snapshot: snapshot?.spark)
-        tokenCostView.update(report: tokenReport, isRefreshing: tokenReportTask != nil)
-        if claudeSnapshot != nil {
-            claudeFiveHourView.update(
-                title: UIFormatters.rateLimitWindowTitle(for: claudeSnapshot?.fiveHour, fallback: "5-hour window"),
-                window: claudeSnapshot?.fiveHour
-            )
-            claudeWeeklyView.update(
-                title: UIFormatters.rateLimitWindowTitle(for: claudeSnapshot?.sevenDay, fallback: "Weekly window"),
-                window: claudeSnapshot?.sevenDay
-            )
-            claudeModelWeeklyView.update(title: "\(claudeSnapshot?.modelWeeklyName ?? "Model") weekly", window: claudeSnapshot?.modelWeekly)
-        }
-        claudeStatusView.update(message: claudeStatusMessage())
-        // Whichever section leads the menu carries the refresh button; Codex's header has its own.
-        claudeSectionView.update(title: "Claude Code", showsRefresh: primaryProvider == .claude, isRefreshing: claudeUsageTask != nil)
-        claudeTokenCostView.update(
-            report: claudeTokenReport,
-            isRefreshing: claudeTokenTask != nil,
-            sourceName: "Claude Code",
-            failed: claudeTokenFailed
-        )
-        for item in [headerItem, primaryUsageItem, tokenCostItem, statusItemView, accountsItem, logoutItem, openCodexItem, removeAccountItem] {
-            item.isHidden = !codexEnabled
-        }
-        secondaryUsageItem.isHidden = !codexEnabled || !hasBothWindows
-        sparkUsageItem.isHidden = !codexEnabled || snapshot?.spark == nil
-        for item in [claudeSectionItem, claudeTokenCostItem, claudeStatusItem] {
-            item.isHidden = !claudeEnabled
-        }
-        claudeFiveHourItem.isHidden = !claudeEnabled || claudeSnapshot?.fiveHour == nil
-        claudeWeeklyItem.isHidden = !claudeEnabled || claudeSnapshot?.sevenDay == nil
-        claudeModelWeeklyItem.isHidden = !claudeEnabled || claudeSnapshot?.modelWeekly == nil
-        enableClaudeItem.isHidden = !claudeEnabled || (claudeBridgeEnabled && claudeUsageError == nil)
-        codexHeaderSeparator.isHidden = !codexEnabled
-        sectionSeparator.isHidden = !codexEnabled || !claudeEnabled
-        codexPrimaryItem.state = primaryProvider == .codex ? .on : .off
-        claudePrimaryItem.state = primaryProvider == .claude ? .on : .off
-        codexToggleItem.state = codexEnabled ? .on : .off
-        claudeToggleItem.state = claudeEnabled ? .on : .off
-        codexToggleItem.isEnabled = primaryProvider != .codex
-        claudeToggleItem.isEnabled = primaryProvider != .claude
-        statusView.update(snapshot: snapshot, refreshState: refreshState, accountStatus: accountStatusMessage())
         usageHistoryWindowController?.update(
             report: tokenReport,
             claudeReport: claudeTokenReport,
+            antigravityReport: agyTokenReport,
             planHistory: planHistory,
             snapshot: snapshot,
             accountPlan: activeAccountSnapshot?.planType ?? .unknown
         )
-        renderAccountsMenu()
-
-        launchAtLoginItem.state = launchAtLoginController.isEnabled ? .on : .off
-        logoutItem.isEnabled = refreshTask == nil && activeAccountSnapshot?.isSignedIn == true
-        openCodexItem.title = "Open Codex with Selected Account"
-        openCodexItem.isEnabled = activeAccountSnapshot?.isSignedIn == true
-        removeAccountItem.title = "Remove Current Account…"
-        removeAccountItem.isEnabled = refreshTask == nil && activeProfile?.kind == .managed
     }
 
-    private func renderAccountsMenu() {
-        accountsMenu.removeAllItems()
-
-        guard let accountState else {
-            let item = NSMenuItem(title: "No account profiles available", action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            accountsMenu.addItem(item)
-            return
+    /// Single privacy-aware label used across the Codex header, account picker, removal dialog, and debug info.
+    func privacySafeProfileLabel(for profile: AccountProfile, snapshot: CodexAccountSnapshot?) -> String {
+        if showAccountEmail {
+            if let snapshot, snapshot.isSignedIn {
+                if profile.kind == .managed, let name = profile.name, !name.isEmpty {
+                    return name
+                }
+                return snapshot.displayName
+            }
+            return profile.displayName
         }
 
-        for profile in accountState.profiles {
-            let item = NSMenuItem(
-                title: title(for: profile),
-                action: #selector(selectAccountProfile(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = profile.id
-            item.state = profile.id == accountState.activeProfileID ? .on : .off
-            item.isEnabled = refreshTask == nil
-            accountsMenu.addItem(item)
+        if profile.kind == .systemDefault {
+            return "Default Account"
         }
-
-        accountsMenu.addItem(.separator())
-
-        let addItem = NSMenuItem(title: "Add Account…", action: #selector(addAccount), keyEquivalent: "")
-        addItem.target = self
-        addItem.isEnabled = refreshTask == nil
-        accountsMenu.addItem(addItem)
-
-        let signInTitle = activeAccountSnapshot?.isSignedIn == true ? "Reauthenticate Current Account…" : "Sign In Current Account…"
-        let signInItem = NSMenuItem(title: signInTitle, action: #selector(signInCurrentAccount), keyEquivalent: "")
-        signInItem.target = self
-        signInItem.isEnabled = refreshTask == nil && activeProfile != nil
-        accountsMenu.addItem(signInItem)
-
-        let appHintItem = NSMenuItem(title: "Open Codex applies the selected account to Codex.app.", action: nil, keyEquivalent: "")
-        appHintItem.isEnabled = false
-        accountsMenu.addItem(appHintItem)
-
-        if activeProfile?.kind == .managed {
-            accountsMenu.addItem(.separator())
-            accountsMenu.addItem(removeAccountItem)
+        if let name = profile.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !name.isEmpty,
+           !name.contains("@") {
+            return name
         }
+        let managed = (accountState?.profiles ?? []).filter { $0.kind == .managed }
+        if managed.count > 1, let idx = managed.firstIndex(where: { $0.id == profile.id }) {
+            return "Managed Account \(idx + 1)"
+        }
+        return "Managed Account"
     }
 
-    private func title(for profile: AccountProfile) -> String {
-        if let snapshot = accountSnapshotsByProfileID[profile.id], snapshot.isSignedIn {
-            var parts: [String]
-            if profile.kind == .managed {
-                parts = [profile.name?.isEmpty == false ? profile.displayName : snapshot.displayName]
+    private func buildAccountChoices() -> [PopoverAccountChoice] {
+        guard let accountState else { return [] }
+        return accountState.profiles.map { profile in
+            let snap = accountSnapshotsByProfileID[profile.id]
+            let baseLabel = privacySafeProfileLabel(for: profile, snapshot: snap)
+            let title: String
+            if let snap, snap.isSignedIn {
+                title = baseLabel
+            } else if pendingLoginProfileID == profile.id {
+                title = "\(baseLabel) · Finish sign-in"
             } else {
-                parts = [profile.displayName, snapshot.displayName]
+                title = "\(baseLabel) · Not signed in"
             }
-            if snapshot.planType != .unknown {
-                parts.append(snapshot.planType.displayName)
-            }
-            return parts.joined(separator: " • ")
-        } else if pendingLoginProfileID == profile.id {
-            return "\(profile.kind == .managed ? "New Account" : profile.displayName) • Finish sign-in in Terminal"
-        } else if profile.kind == .managed {
-            return "Signed-out Account • Not signed in"
-        } else {
-            return "\(profile.displayName) • Not signed in"
+            let plan = (snap?.planType != .unknown ? snap?.planType.displayName : nil)
+            return PopoverAccountChoice(
+                id: profile.id,
+                title: title,
+                subtitle: plan,
+                isActive: profile.id == accountState.activeProfileID
+            )
         }
     }
 
@@ -911,18 +922,14 @@ final class AppController: NSObject, NSMenuDelegate {
             uniqueKeysWithValues: state.profiles.compactMap { profile in
                 let authURL = (try? codexDesktopAuthStore.accountInfoURL(for: profile, among: state.profiles)) ?? profile.authURL
                 let snapshot = try? AuthJSONAccountInfoSource(authURL: authURL).loadAccountSnapshot()
-                guard let snapshot else {
-                    return nil
-                }
+                guard let snapshot else { return nil }
                 return (profile.id, snapshot)
             }
         )
     }
 
     private func removeDuplicateManagedProfilesIfNeeded() throws {
-        guard var state = accountState else {
-            return
-        }
+        guard var state = accountState else { return }
 
         var removedActiveProfile = false
         for profile in state.profiles where profile.kind == .managed {
@@ -953,9 +960,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func removeUnsignedManagedProfilesIfNeeded() throws {
-        guard var state = accountState else {
-            return
-        }
+        guard var state = accountState else { return }
 
         var removedActiveProfile = false
         for profile in state.profiles where profile.kind == .managed {
@@ -981,10 +986,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func managedProfileIsDefinitelyUnsigned(_ profile: AccountProfile) -> Bool {
-        guard FileManager.default.fileExists(atPath: profile.authURL.path) else {
-            return true
-        }
-
+        guard FileManager.default.fileExists(atPath: profile.authURL.path) else { return true }
         do {
             return try AuthJSONAccountInfoSource(authURL: profile.authURL).loadAccountSnapshot()?.isSignedIn != true
         } catch {
@@ -1030,10 +1032,7 @@ final class AppController: NSObject, NSMenuDelegate {
         try codexDesktopAuthStore.reconcileSystemAuth(among: profiles)
 
         if profile.kind == .systemDefault {
-            _ = try codexDesktopAuthStore.prepareSystemAuth(
-                for: profile,
-                among: profiles
-            )
+            _ = try codexDesktopAuthStore.prepareSystemAuth(for: profile, among: profiles)
         }
         if let accountState {
             updateAccountState(accountState)
@@ -1045,14 +1044,10 @@ final class AppController: NSObject, NSMenuDelegate {
         render()
 
         Task { [weak self] in
-            guard let self else {
-                return
-            }
+            guard let self else { return }
 
             if loadCachedSnapshot, let repository = self.repository, let cached = await repository.loadCachedSnapshot() {
-                guard self.activeProfile?.id == profile.id else {
-                    return
-                }
+                guard self.activeProfile?.id == profile.id else { return }
                 self.snapshot = cached
                 self.render()
             }
@@ -1098,7 +1093,6 @@ final class AppController: NSObject, NSMenuDelegate {
             if Task.isCancelled {
                 report = nil
             } else {
-                // Sources check cancellation between files, so unticking a provider stops its scan.
                 let scan = Task.detached(priority: .utility) {
                     try Task.checkCancellation()
                     let report = try tokenUsageSource.usageReport()
@@ -1116,9 +1110,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func finishTokenReportRefresh(profileID: String, generation: Int, report: TokenUsageReport?) {
-        guard tokenReportGeneration == generation else {
-            return
-        }
+        guard tokenReportGeneration == generation else { return }
         tokenReportTask = nil
         if codexEnabled, activeProfile?.id == profileID, let report {
             tokenReport = report
@@ -1175,6 +1167,49 @@ final class AppController: NSObject, NSMenuDelegate {
         render()
     }
 
+    private func refreshAgyTokenReportIfNeeded(force: Bool) {
+        guard agyEnabled else { return }
+        guard agyTokenTask == nil else {
+            pendingAgyTokenRefresh = pendingAgyTokenRefresh || force
+            return
+        }
+        let lastAttempt = lastAgyTokenAttempt ?? (agyTokenReport?.historyIncludesAllRetainedSessions == true ? agyTokenReport?.generatedAt : nil)
+        if !force, let lastAttempt, Date().timeIntervalSince(lastAttempt) < Self.refreshInterval { return }
+        lastAgyTokenAttempt = Date()
+        let source = agyTokenSource
+        let store = agyTokenStore
+        agyTokenTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.agyTokenTask = nil
+                self.render()
+                if self.pendingAgyTokenRefresh {
+                    self.pendingAgyTokenRefresh = false
+                    self.refreshAgyTokenReportIfNeeded(force: true)
+                }
+            }
+            do {
+                let scan = Task.detached(priority: .utility) {
+                    try Task.checkCancellation()
+                    let report = try source.usageReport()
+                    try Task.checkCancellation()
+                    try store.save(report)
+                    return report
+                }
+                let report = try await withTaskCancellationHandler {
+                    try await scan.value
+                } onCancel: { scan.cancel() }
+                guard !Task.isCancelled, self.agyEnabled else { return }
+                self.agyTokenReport = report
+                self.agyTokenFailed = false
+            } catch {
+                guard !Task.isCancelled, self.agyEnabled else { return }
+                self.agyTokenFailed = true
+            }
+        }
+        render()
+    }
+
     private func codexEnvironment(for profile: AccountProfile) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         environment["CODEX_HOME"] = profile.homeURL.path
@@ -1194,15 +1229,10 @@ final class AppController: NSObject, NSMenuDelegate {
     private func monitorLogin(for profile: AccountProfile) {
         loginMonitorTask?.cancel()
         loginMonitorTask = Task { [weak self] in
-            guard let self else {
-                return
-            }
+            guard let self else { return }
 
             for _ in 0..<120 {
-                if Task.isCancelled {
-                    return
-                }
-
+                if Task.isCancelled { return }
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled, self.codexEnabled else { return }
 
@@ -1268,33 +1298,26 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func accountStatusMessage() -> String? {
-        guard let activeProfile else {
-            return nil
-        }
-
+        guard let activeProfile else { return nil }
         if pendingLoginProfileID == activeProfile.id {
             return "Finish sign-in in Terminal"
         }
-
-        guard activeAccountSnapshot?.isSignedIn != true else {
-            return nil
-        }
-
+        guard activeAccountSnapshot?.isSignedIn != true else { return nil }
         return "Sign in this account from Accounts"
     }
 
     private var activeAccountSnapshot: CodexAccountSnapshot? {
-        guard let activeProfile else {
-            return nil
-        }
+        guard let activeProfile else { return nil }
         return accountSnapshotsByProfileID[activeProfile.id] ?? nil
     }
 
-    private func debugSummary() -> String {
+    func debugSummary() -> String {
         let info = Bundle.main.infoDictionary
         let version = info?["CFBundleShortVersionString"] as? String ?? "unknown"
         let build = info?["CFBundleVersion"] as? String ?? "unknown"
-        let account = snapshot?.account.email ?? snapshot?.displayAccountName ?? activeAccountSnapshot?.displayName ?? "unknown"
+        let account = showAccountEmail
+            ? (snapshot?.account.email ?? snapshot?.displayAccountName ?? activeAccountSnapshot?.displayName ?? "unknown")
+            : "(hidden)"
         let plan = snapshot?.account.planType.displayName ?? activeAccountSnapshot?.planType.displayName ?? "Unknown"
         let renewsAt = snapshot?.account.renewsAt ?? activeAccountSnapshot?.renewsAt
         let source = snapshot?.source.displayName ?? "none"
@@ -1308,8 +1331,11 @@ final class AppController: NSObject, NSMenuDelegate {
         let last30DaysTokenCost = tokenReport.map { UIFormatters.costString($0.month.estimatedCostUSD) } ?? "unavailable"
         let allTimeTokenCost = tokenReport.map { UIFormatters.costString($0.allTime.estimatedCostUSD) } ?? "unavailable"
         let updatedAt = snapshot.map { UIFormatters.usageUpdatedString(from: $0.lastUpdatedAt) } ?? "never"
-        let profileLabel = activeProfile?.displayName ?? "unknown"
+        let profileLabel = activeProfile.map { privacySafeProfileLabel(for: $0, snapshot: activeAccountSnapshot) } ?? "unknown"
         let profileHome = activeProfile?.homeURL.path ?? "unknown"
+        let agyWeekCost = agyTokenReport.map { UIFormatters.costString($0.week.estimatedCostUSD) } ?? "unavailable"
+        let agyAllCost = agyTokenReport.map { UIFormatters.costString($0.allTime.estimatedCostUSD) } ?? "unavailable"
+        let agyBuckets = agySnapshot?.activeBuckets.map { "\($0.title): \($0.window.usedPercent)%" }.joined(separator: ", ") ?? "unavailable"
 
         return [
             "CodexPeek \(version) (\(build))",
@@ -1334,7 +1360,12 @@ final class AppController: NSObject, NSMenuDelegate {
             "Claude \(claudeSnapshot?.modelWeeklyName ?? "model") weekly usage: \(claudeSnapshot?.modelWeekly.map { "\($0.usedPercent)%" } ?? "unavailable")",
             "Claude local bridge: \(claudeBridgeEnabled ? "enabled" : "disabled")",
             "Claude stale: \(claudeSnapshot?.isStale == true ? "yes" : "no")",
-            "Claude updated: \(claudeSnapshot.map { UIFormatters.usageUpdatedString(from: $0.updatedAt) } ?? "never")"
+            "Claude updated: \(claudeSnapshot.map { UIFormatters.usageUpdatedString(from: $0.updatedAt) } ?? "never")",
+            "Antigravity quota: \(agyBuckets)",
+            "Antigravity statusline bridge: \(agyBridgeEnabled ? "enabled" : "disabled")",
+            "Antigravity 7-day API-equivalent estimate: \(agyWeekCost)",
+            "Antigravity all-time API-equivalent estimate: \(agyAllCost)",
+            "Antigravity sessions: \(agyTokenReport?.allTime.sessionCount ?? 0)"
         ].joined(separator: "\n")
     }
 
@@ -1343,6 +1374,29 @@ final class AppController: NSObject, NSMenuDelegate {
         claudeUsageWatcher.start(watching: ClaudeCodeStatusLine.cacheURL) { [weak self] in
             Task { @MainActor [weak self] in self?.refreshClaudeUsage() }
         }
+    }
+
+    private func watchAgyUsage() {
+        guard agyEnabled else { return }
+        agyUsageWatcher.start(watching: AntigravityStatusLine.cacheURL) { [weak self] in
+            Task { @MainActor [weak self] in self?.refreshAgyUsage() }
+        }
+    }
+
+    private func refreshAgyUsage() {
+        guard agyEnabled else { return }
+        do {
+            let cached = try AntigravityStatusLine.load()
+            if let cached, cached.updatedAt != agySnapshot?.updatedAt, !cached.isStale {
+                agyUsageError = nil
+            }
+            agySnapshot = cached
+            agyBridgeEnabled = try AntigravityStatusLine.isInstalled()
+        } catch {
+            agySnapshot?.isStale = true
+            agyUsageError = "Could not read local Antigravity usage"
+        }
+        render()
     }
 
     private func refreshClaudeUsage() {
@@ -1371,7 +1425,6 @@ final class AppController: NSObject, NSMenuDelegate {
             $0.isStale || Date().timeIntervalSince($0.updatedAt) >= Self.refreshInterval - Self.refreshTolerance
         } ?? true
         guard claudeEnabled, claudeUsageTask == nil, force || due else { return }
-        // Off-phase fetches (manual, re-enabled) restart the shared wait so the next tick finds the reading due.
         refreshTimer?.fireDate = Date().addingTimeInterval(Self.refreshInterval)
         claudeUsageTask = Task { [weak self] in
             guard let self else { return }
@@ -1394,17 +1447,5 @@ final class AppController: NSObject, NSMenuDelegate {
             }
         }
         render()
-    }
-
-    private func claudeStatusMessage() -> String {
-        if let claudeUsageError {
-            let time = claudeSnapshot.map { " • last updated \(UIFormatters.usageUpdatedString(from: $0.updatedAt))" } ?? ""
-            return claudeUsageError + time
-        }
-        guard let claudeSnapshot else {
-            return claudeUsageTask == nil ? "Claude usage unavailable • use the refresh button" : "Fetching Claude usage…"
-        }
-        let time = UIFormatters.usageUpdatedString(from: claudeSnapshot.updatedAt)
-        return claudeSnapshot.isStale ? "Claude usage updated \(time) • stale" : "From Claude Code • updated \(time)"
     }
 }

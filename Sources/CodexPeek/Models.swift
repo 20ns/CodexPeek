@@ -82,6 +82,13 @@ struct RateLimitWindowSnapshot: Codable, Equatable {
         let remaining = resetsAt.timeIntervalSince(now) / (Double(windowDurationMins) * 60)
         return min(max(1 - remaining, 0), 1)
     }
+
+    /// Even-burn pace for 24-hour and weekly windows (skips short session windows).
+    func pace(now: Date = Date()) -> Double? {
+        guard let windowDurationMins, windowDurationMins >= 1440, let resetsAt, resetsAt > now else { return nil }
+        let remaining = resetsAt.timeIntervalSince(now) / (Double(windowDurationMins) * 60)
+        return min(max(1 - remaining, 0), 1)
+    }
 }
 
 struct SupplementalRateLimitSnapshot: Codable, Equatable {

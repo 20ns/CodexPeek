@@ -47,11 +47,12 @@ final class UsageHistoryWindowController: NSWindowController, NSWindowDelegate {
     func show(
         report: TokenUsageReport?,
         claudeReport: TokenUsageReport?,
+        antigravityReport: TokenUsageReport? = nil,
         planHistory: PlanUsageHistory,
         snapshot: CodexUsageSnapshot?,
         accountPlan: CodexPlanType = .unknown
     ) {
-        updateInputs(report: report, claudeReport: claudeReport, planHistory: planHistory, snapshot: snapshot, accountPlan: accountPlan)
+        updateInputs(report: report, claudeReport: claudeReport, antigravityReport: antigravityReport, planHistory: planHistory, snapshot: snapshot, accountPlan: accountPlan)
         showWindow(nil)
         window?.center()
         NSApp.activate(ignoringOtherApps: true)
@@ -60,17 +61,19 @@ final class UsageHistoryWindowController: NSWindowController, NSWindowDelegate {
     func update(
         report: TokenUsageReport?,
         claudeReport: TokenUsageReport?,
+        antigravityReport: TokenUsageReport? = nil,
         planHistory: PlanUsageHistory,
         snapshot: CodexUsageSnapshot?,
         accountPlan: CodexPlanType = .unknown
     ) {
         guard window?.isVisible == true else { return }
-        updateInputs(report: report, claudeReport: claudeReport, planHistory: planHistory, snapshot: snapshot, accountPlan: accountPlan)
+        updateInputs(report: report, claudeReport: claudeReport, antigravityReport: antigravityReport, planHistory: planHistory, snapshot: snapshot, accountPlan: accountPlan)
     }
 
     private func updateInputs(
         report: TokenUsageReport?,
         claudeReport: TokenUsageReport?,
+        antigravityReport: TokenUsageReport?,
         planHistory: PlanUsageHistory,
         snapshot: CodexUsageSnapshot?,
         accountPlan: CodexPlanType
@@ -79,6 +82,7 @@ final class UsageHistoryWindowController: NSWindowController, NSWindowDelegate {
         sessionState.setInputs(HistoryInputs(
             codex: report,
             claude: claudeReport,
+            antigravity: antigravityReport,
             planHistory: planHistory,
             planType: fromSnapshot != .unknown ? fromSnapshot : accountPlan
         ))
@@ -111,6 +115,7 @@ final class UsageHistorySessionState: ObservableObject {
         case all = "Combined"
         case claude = "Claude Code"
         case codex = "Codex"
+        case antigravity = "Antigravity"
         var id: String { rawValue }
     }
 
@@ -149,13 +154,21 @@ final class UsageHistorySessionState: ObservableObject {
 enum HistorySource: CaseIterable {
     case claude
     case codex
+    case antigravity
 
-    var name: String { self == .claude ? "Claude Code" : "Codex" }
+    var name: String {
+        switch self {
+        case .claude: "Claude Code"
+        case .codex: "Codex"
+        case .antigravity: "Antigravity"
+        }
+    }
 
     var color: Color {
         switch self {
         case .claude: return .adaptive(light: (0.80, 0.36, 0.20), dark: (0.93, 0.52, 0.38))
         case .codex: return .adaptive(light: (0.12, 0.40, 0.88), dark: (0.38, 0.62, 1.0))
+        case .antigravity: return .adaptive(light: (0.42, 0.34, 0.88), dark: (0.55, 0.49, 1.0))
         }
     }
 }
@@ -163,9 +176,10 @@ enum HistorySource: CaseIterable {
 extension UsageHistorySessionState.Provider {
     fileprivate var sources: [HistorySource] {
         switch self {
-        case .all: return [.claude, .codex]
+        case .all: return [.claude, .codex, .antigravity]
         case .claude: return [.claude]
         case .codex: return [.codex]
+        case .antigravity: return [.antigravity]
         }
     }
 
@@ -175,6 +189,7 @@ extension UsageHistorySessionState.Provider {
         case .all: return Color.primary.opacity(0.7)
         case .claude: return HistorySource.claude.color
         case .codex: return HistorySource.codex.color
+        case .antigravity: return HistorySource.antigravity.color
         }
     }
 }
@@ -182,11 +197,16 @@ extension UsageHistorySessionState.Provider {
 struct HistoryInputs: Equatable {
     var codex: TokenUsageReport?
     var claude: TokenUsageReport?
+    var antigravity: TokenUsageReport?
     var planHistory = PlanUsageHistory()
     var planType: CodexPlanType = .unknown
 
     func report(_ source: HistorySource) -> TokenUsageReport? {
-        source == .codex ? codex : claude
+        switch source {
+        case .codex: codex
+        case .claude: claude
+        case .antigravity: antigravity
+        }
     }
 }
 
@@ -194,16 +214,21 @@ struct HistoryDay: Identifiable {
     let day: Date
     var claude = 0.0
     var codex = 0.0
+    var antigravity = 0.0
     var tokens = 0
     var cacheSavings = 0.0
     var topModel: String?
     fileprivate var topModelTokens = 0
 
     var id: Date { day }
-    var cost: Double { claude + codex }
+    var cost: Double { claude + codex + antigravity }
 
     func cost(of source: HistorySource) -> Double {
-        source == .claude ? claude : codex
+        switch source {
+        case .claude: claude
+        case .codex: codex
+        case .antigravity: antigravity
+        }
     }
 }
 
@@ -230,6 +255,10 @@ struct HistorySummary {
     var spend = 0.0
     var cacheSavings = 0.0
     var tokens = 0
+    var inputTokens = 0
+    var cachedInputTokens = 0
+    var outputTokens = 0
+    var reasoningTokens = 0
     var input = 0.0
     var output = 0.0
     var reasoning = 0.0
@@ -303,9 +332,19 @@ enum HistoryContent {
 
             for (index, usage) in report.daily.enumerated() {
                 let cost = usage.costByModel.values.reduce(Decimal(0), +).double
-                if source == .claude { summary.days[index].claude = cost } else { summary.days[index].codex = cost }
+                switch source {
+                case .claude: summary.days[index].claude = cost
+                case .codex: summary.days[index].codex = cost
+                case .antigravity: summary.days[index].antigravity = cost
+                }
                 summary.days[index].tokens += usage.totalTokens
                 summary.days[index].cacheSavings += usage.cacheSavings.double
+                for payload in usage.byModel.values {
+                    summary.inputTokens += payload.inputTokens
+                    summary.cachedInputTokens += payload.cachedInputTokens
+                    summary.outputTokens += payload.outputTokens
+                    summary.reasoningTokens += payload.reasoningOutputTokens
+                }
                 if let top = usage.byModel.max(by: { $0.value.totalTokens < $1.value.totalTokens }),
                    top.value.totalTokens > summary.days[index].topModelTokens {
                     summary.days[index].topModel = TokenPricingCatalog.standard.displayModelName(for: top.key)
@@ -447,6 +486,9 @@ private struct Glow: View {
             if provider.sources.contains(.codex) {
                 RadialGradient(colors: [HistorySource.codex.color.opacity(0.18), .clear], center: .bottomTrailing, startRadius: 0, endRadius: 620)
             }
+            if provider.sources.contains(.antigravity) {
+                RadialGradient(colors: [HistorySource.antigravity.color.opacity(0.18), .clear], center: .topTrailing, startRadius: 0, endRadius: 540)
+            }
         }
         .allowsHitTesting(false)
     }
@@ -462,8 +504,12 @@ private struct HeaderBar: View {
         if state.provider == .codex, let seat = summary.seat {
             parts.append("\(seat.label) · \(UIFormatters.costString(Decimal(seat.price)))/mo")
         }
-        if summary.sources.count < state.provider.sources.count, let only = summary.sources.first {
-            parts.append("\(only.name) only")
+        if summary.sources.count < state.provider.sources.count {
+            if summary.sources.count == 1, let only = summary.sources.first {
+                parts.append("\(only.name) only")
+            } else if !summary.sources.isEmpty {
+                parts.append(summary.sources.map(\.name).joined(separator: " + ") + " only")
+            }
         }
         if let updatedAt = summary.updatedAt {
             parts.append("Updated \(UIFormatters.usageUpdatedString(from: updatedAt))")
@@ -581,19 +627,21 @@ private struct HeroCard: View {
     let compact: Bool
 
     var body: some View {
-        HStack(alignment: .center, spacing: 8) {
+        HStack(alignment: .center, spacing: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("API-equivalent value · \(rangeLabel)")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 Text(Fmt.money(summary.spend))
-                    .font(.system(size: compact ? 48 : 60, weight: .semibold))
+                    .font(.system(size: compact ? 48 : 58, weight: .semibold))
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
                 context
             }
-            .frame(width: 340, alignment: .leading)
+            .frame(minWidth: 340, alignment: .leading)
+            .layoutPriority(1)
 
             HStack(alignment: .top, spacing: 0) {
                 ForEach(Array(stats.enumerated()), id: \.offset) { index, stat in
@@ -606,7 +654,7 @@ private struct HeroCard: View {
             .frame(maxWidth: .infinity)
         }
         .padding(.horizontal, 24)
-        .padding(.vertical, compact ? 16 : 22)
+        .padding(.vertical, compact ? 16 : 20)
         .glassPanel(radius: 20)
     }
 
@@ -619,17 +667,24 @@ private struct HeroCard: View {
             }
             .padding(.top, 2)
         } else if summary.sources.count > 1 {
-            HStack(spacing: 16) {
+            HStack(spacing: 8) {
                 ForEach(summary.sources, id: \.self) { source in
-                    HStack(spacing: 6) {
-                        Circle().fill(source.color).frame(width: 8, height: 8)
+                    let amount = summary.spend(of: source)
+                    HStack(spacing: 5) {
+                        Circle().fill(source.color).frame(width: 7, height: 7)
                         Text(source.name).foregroundStyle(.secondary)
-                        Text(Fmt.money(summary.spend(of: source))).monospacedDigit()
+                        Text(Fmt.money(amount)).monospacedDigit().fontWeight(.medium)
                     }
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.primary.opacity(0.05), in: Capsule())
+                    .opacity(amount > 0 ? 1 : 0.5)
                     .accessibilityElement(children: .combine)
                 }
             }
-            .font(.system(size: 13))
+            .font(.system(size: 12))
         }
     }
 
@@ -787,12 +842,27 @@ private struct ChartCard: View {
                         Circle().fill(source.color).frame(width: 8, height: 8)
                         Text(source.name)
                     }
+                    .opacity(summary.spend(of: source) > 0 ? 1 : 0.45)
                 }
             }
             if seatPerDay != nil {
                 HStack(spacing: 5) {
                     Capsule().fill(Color.primary.opacity(0.45)).frame(width: 14, height: 2)
                     Text("Seat cost per day")
+                }
+            } else if hasActivity, summary.spend > 0 {
+                HStack(spacing: 5) {
+                    Rectangle()
+                        .fill(Color.clear)
+                        .frame(width: 14, height: 2)
+                        .overlay {
+                            Path { p in
+                                p.move(to: CGPoint(x: 0, y: 1))
+                                p.addLine(to: CGPoint(x: 14, y: 1))
+                            }
+                            .stroke(Color.primary.opacity(0.35), style: StrokeStyle(lineWidth: 1.2, dash: [3, 2.5]))
+                        }
+                    Text("Daily avg")
                 }
             }
         }
@@ -830,7 +900,13 @@ private struct CostChart: View {
     }
 
     private var yTicks: [Double] {
-        dense ? Array(stride(from: 0, through: scale.top + 1e-9, by: scale.step)) : [0]
+        Array(stride(from: 0, through: scale.top + 1e-9, by: scale.step))
+    }
+
+    private var averagePerDay: Double? {
+        guard seatPerDay == nil, !days.isEmpty else { return nil }
+        let avg = rangeTotal / Double(days.count)
+        return avg > 0 ? avg : nil
     }
 
     /// Dense ranges keep about eight labels, aligned to today; ranges past 90 days label month starts so names never skip.
@@ -880,6 +956,12 @@ private struct CostChart: View {
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     .accessibilityLabel("Seat cost per day")
                     .accessibilityValue(Fmt.money(seatPerDay))
+            } else if let avg = averagePerDay {
+                RuleMark(y: .value("Daily average", avg))
+                    .foregroundStyle(Color.primary.opacity(0.24))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    .accessibilityLabel("Daily average")
+                    .accessibilityValue(Fmt.money(avg))
             }
         }
         .chartForegroundStyleScale(domain: sources.map(\.name), range: sources.map(\.color))
@@ -1132,14 +1214,23 @@ private struct CompositionCard: View {
     let tint: Color
     let compact: Bool
 
+    private static let inputColor = Color.adaptive(light: (0.20, 0.45, 0.82), dark: (0.40, 0.63, 0.96))
+    private static let outputColor = Color.adaptive(light: (0.10, 0.56, 0.44), dark: (0.24, 0.78, 0.62))
+    private static let reasoningColor = Color.adaptive(light: (0.48, 0.34, 0.86), dark: (0.66, 0.54, 0.98))
+
     var body: some View {
         let total = summary.input + summary.output
         let hasData = total > 0
-        let inputColor = Color.primary.opacity(0.25)
+        let visibleOutputCost = max(summary.output - summary.reasoning, 0)
+        let visibleOutputTokens = max(summary.outputTokens - summary.reasoningTokens, 0)
+        let cacheHitRate: Double? = summary.inputTokens > 0
+            ? min(max(Double(summary.cachedInputTokens) / Double(summary.inputTokens), 0), 1)
+            : nil
+        let peakDay = summary.days.max { $0.cost < $1.cost }
 
         VStack(alignment: .leading, spacing: compact ? 10 : 14) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Input vs output").font(.system(size: 14, weight: .semibold))
+                Text("Cost breakdown").font(.system(size: 14, weight: .semibold))
                 Spacer(minLength: 8)
                 if hasData {
                     Text("of \(Fmt.money(total))").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -1150,10 +1241,10 @@ private struct CompositionCard: View {
                 GeometryReader { geometry in
                     let available = max(geometry.size.width - 4, 0)
                     HStack(spacing: 2) {
-                        Capsule().fill(inputColor).frame(width: available * summary.input / total)
-                        Capsule().fill(tint).frame(width: available * (summary.output - summary.reasoning) / total)
+                        Capsule().fill(Self.inputColor).frame(width: max(0, available * summary.input / total))
+                        Capsule().fill(Self.outputColor).frame(width: max(0, available * visibleOutputCost / total))
                         if summary.reasoning > 0 {
-                            Capsule().fill(tint.opacity(0.45)).frame(width: available * summary.reasoning / total)
+                            Capsule().fill(Self.reasoningColor).frame(width: max(0, available * summary.reasoning / total))
                         }
                     }
                 }
@@ -1161,10 +1252,72 @@ private struct CompositionCard: View {
                 .accessibilityHidden(true)
 
                 HStack(alignment: .top, spacing: 12) {
-                    CompositionStat(label: "Input", value: summary.input, share: summary.input / total, color: inputColor)
-                    CompositionStat(label: "Output", value: summary.output - summary.reasoning, share: (summary.output - summary.reasoning) / total, color: tint)
+                    CompositionStat(
+                        label: "Input",
+                        value: summary.input,
+                        share: summary.input / total,
+                        tokenDetail: "\(UIFormatters.compactTokenString(summary.inputTokens)) tokens",
+                        color: Self.inputColor
+                    )
+                    CompositionStat(
+                        label: "Output",
+                        value: visibleOutputCost,
+                        share: visibleOutputCost / total,
+                        tokenDetail: "\(UIFormatters.compactTokenString(visibleOutputTokens)) tokens",
+                        color: Self.outputColor
+                    )
                     if summary.reasoning > 0 {
-                        CompositionStat(label: "Reasoning", value: summary.reasoning, share: summary.reasoning / total, color: tint.opacity(0.45))
+                        CompositionStat(
+                            label: "Reasoning",
+                            value: summary.reasoning,
+                            share: summary.reasoning / total,
+                            tokenDetail: "\(UIFormatters.compactTokenString(summary.reasoningTokens)) tokens",
+                            color: Self.reasoningColor
+                        )
+                    }
+                }
+
+                Divider().opacity(0.35)
+
+                VStack(alignment: .leading, spacing: compact ? 8 : 10) {
+                    if let cacheHitRate {
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text("Prompt cache hit rate")
+                                    .font(.system(size: 12.5, weight: .medium))
+                                Spacer(minLength: 8)
+                                Text(Fmt.share(cacheHitRate))
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .monospacedDigit()
+                                if summary.cacheSavings > 0 {
+                                    Text("saved \(Fmt.money(summary.cacheSavings))")
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(.secondary)
+                                        .monospacedDigit()
+                                }
+                            }
+                            Meter(fraction: cacheHitRate, color: Self.outputColor)
+                        }
+                    }
+
+                    if let peakDay, peakDay.cost > 0 {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text("Peak day")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 8)
+                            Text(peakDay.day.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)))
+                                .font(.system(size: 12, weight: .medium))
+                            Text(Fmt.money(peakDay.cost))
+                                .font(.system(size: 12, weight: .semibold))
+                                .monospacedDigit()
+                            if summary.spend > 0 {
+                                Text(Fmt.share(peakDay.cost / summary.spend))
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                        }
                     }
                 }
             } else {
@@ -1184,6 +1337,7 @@ private struct CompositionStat: View {
     let label: String
     let value: Double
     let share: Double
+    let tokenDetail: String
     let color: Color
 
     var body: some View {
@@ -1197,6 +1351,11 @@ private struct CompositionStat: View {
                 Text(Fmt.share(share)).font(.system(size: 12)).foregroundStyle(.secondary)
             }
             .lineLimit(1)
+            Text(tokenDetail)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
