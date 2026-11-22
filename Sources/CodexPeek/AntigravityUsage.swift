@@ -140,7 +140,9 @@ enum AntigravityStatusLine {
         guard !buckets.isEmpty else { return nil }
 
         let planTier = (root["plan_tier"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cache = Cache(updatedAt: now, planTier: planTier?.isEmpty == false ? planTier : nil, buckets: buckets)
+        // `/usage` has no plan tier, so keep the one an earlier statusline capture stored.
+        let kept = planTier?.isEmpty == false ? planTier : readCache(url)?.planTier
+        let cache = Cache(updatedAt: now, planTier: kept, buckets: buckets)
         try writeCache(cache, to: url)
         return snapshot(cache, now: now)
     }
@@ -153,30 +155,38 @@ enum AntigravityStatusLine {
         return snapshot(cache, now: now)
     }
 
-    static func install(executableURL: URL, configDirectory: URL = AntigravityConfig.cliDirectory()) throws {
-        let settingsURL = configDirectory.appendingPathComponent("settings.json")
-        let helperURL = configDirectory.appendingPathComponent(helperName)
-        let current = try readSettings(settingsURL)
-        let command = statusCommand(helperURL: helperURL, previous: current.command)
-        try FileManager.default.createDirectory(at: configDirectory, withIntermediateDirectories: true)
-        try installHelper(from: executableURL, to: helperURL)
-        guard command != current.command else { return }
-        if current.existed {
-            let backup = settingsURL.deletingLastPathComponent().appendingPathComponent("settings.json.codexpeek-backup")
-            if !FileManager.default.fileExists(atPath: backup.path) {
-                try FileManager.default.copyItem(at: settingsURL, to: backup)
-                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
+    /// Reshapes `agy -p /usage --output-format json` into the statusline `quota` payload.
+    static func quotaPayload(fromUsage data: Data) throws -> Data {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let groups = ((root["command"] as? [String: Any])?["data"] as? [String: Any])?["groups"] as? [[String: Any]] else {
+            throw Failure.rejected
+        }
+        var quota: [String: Any] = [:]
+        for bucket in groups.flatMap({ $0["buckets"] as? [[String: Any]] ?? [] }) {
+            guard let id = bucket["id"] as? String else { continue }
+            quota[id] = ["remaining_fraction": bucket["remaining_fraction"] as Any, "reset_time": bucket["reset_time"] as Any]
+        }
+        return try JSONSerialization.data(withJSONObject: ["quota": quota])
+    }
+
+    /// Runs the local `/usage` slash command (0 tokens, ~10 s) and stores the result like a statusline capture.
+    /// The ACP server exposes no quota, so this is what keeps AGY fresh when only T3 Code is running.
+    static func fetchUsage(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        timeout: TimeInterval = 30
+    ) async throws -> AntigravityUsageSnapshot {
+        guard let executable = findCLI(environment: environment) else { throw FetchError.notFound }
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                do {
+                    let output = try runUsage(executable, timeout: timeout)
+                    guard let snapshot = try capture(quotaPayload(fromUsage: output)) else { throw Failure.rejected }
+                    continuation.resume(returning: snapshot)
+                } catch {
+                    continuation.resume(throwing: FetchError.failed)
+                }
             }
         }
-        var root = current.root
-        var status = root["statusLine"] as? [String: Any] ?? [:]
-        if !(status["type"] is String) { status["type"] = "command" }
-        if status["stack_with_default"] == nil { status["stack_with_default"] = true }
-        status["command"] = command
-        root["statusLine"] = status
-        try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
-            .write(to: settingsURL, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: settingsURL.path)
     }
 
     static func updateHelperIfInstalled(executableURL: URL, configDirectory: URL = AntigravityConfig.cliDirectory()) {
@@ -203,8 +213,9 @@ enum AntigravityStatusLine {
         case "gemini-weekly": return "Gemini weekly"
         case "gemini-pro": return "Gemini Pro"
         case "gemini-flash": return "Gemini Flash"
-        case "claude-5h", "claude-gpt-5h": return "Claude / GPT 5-hour"
-        case "claude-weekly", "claude-gpt-weekly": return "Claude / GPT weekly"
+        case "claude-5h", "claude-gpt-5h", "3p-5h": return "Claude / GPT 5-hour"
+        case "claude-weekly", "claude-gpt-weekly", "3p-weekly": return "Claude / GPT weekly"
+        case "gemini-argon-wtu-weekly": return "Gemini Argon weekly"
         default:
             return bucketID
                 .replacingOccurrences(of: "_", with: " ")
@@ -219,6 +230,56 @@ enum AntigravityStatusLine {
                 }
                 .joined(separator: " ")
         }
+    }
+
+    enum FetchError: LocalizedError {
+        case notFound, failed
+        var errorDescription: String? {
+            self == .notFound ? "Antigravity CLI (agy) not found" : "Could not read agy /usage"
+        }
+    }
+
+    private static func findCLI(environment: [String: String]) -> URL? {
+        let explicit = environment["AGY_CLI_PATH"].map { [($0 as NSString).expandingTildeInPath] } ?? []
+        let dirs = (environment["PATH"] ?? "").split(separator: ":").map(String.init)
+            + [("~/.local/bin" as NSString).expandingTildeInPath, "/opt/homebrew/bin", "/usr/local/bin"]
+        return (explicit + dirs.map { $0 + "/agy" })
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+            .map { URL(fileURLWithPath: $0) }
+    }
+
+    /// agy writes (and rotates) one log per run, so point it at a temp file and delete that afterwards.
+    /// Output goes to a file, not a pipe: a child agy spawns could hold a pipe open and block the read forever.
+    private static func runUsage(_ executable: URL, timeout: TimeInterval) throws -> Data {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("codexpeek-agy-\(UUID().uuidString)")
+        let logFile = base.appendingPathExtension("log"), outFile = base.appendingPathExtension("json")
+        defer {
+            try? FileManager.default.removeItem(at: logFile)
+            try? FileManager.default.removeItem(at: outFile)
+        }
+        FileManager.default.createFile(atPath: outFile.path, contents: nil)
+        let output = try FileHandle(forWritingTo: outFile)
+        defer { try? output.close() }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["-p", "/usage", "--output-format", "json", "--log-file", logFile.path]
+        process.standardInput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.standardOutput = output
+        try process.run()
+        // SIGKILL, not terminate(): a wedged agy ignoring SIGTERM would hang the fetch and its spinner forever.
+        let watchdog = DispatchWorkItem { kill(process.processIdentifier, SIGKILL) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+        process.waitUntilExit()
+        watchdog.cancel()
+        guard process.terminationStatus == 0 else { throw FetchError.failed }
+        return try Data(contentsOf: outFile)
+    }
+
+    private static func readCache(_ url: URL) -> Cache? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        return (try? Data(contentsOf: url)).flatMap { try? decoder.decode(Cache.self, from: $0) }
     }
 
     private struct Cache: Codable {
@@ -269,7 +330,7 @@ enum AntigravityStatusLine {
     private static func sortRank(_ bucketID: String) -> Int {
         let lower = bucketID.lowercased()
         if lower.contains("gemini") && (lower.contains("5h") || lower.contains("session")) { return 0 }
-        if lower.contains("gemini") && lower.contains("week") { return 1 }
+        if lower.contains("gemini") && lower.contains("week") && !lower.contains("argon") { return 1 }
         if lower.contains("gemini") { return 2 }
         if lower.contains("5h") || lower.contains("session") { return 3 }
         if lower.contains("week") { return 4 }
@@ -314,15 +375,6 @@ enum AntigravityStatusLine {
         } catch {
             throw Failure.installFailed
         }
-    }
-
-    private static func statusCommand(helperURL: URL, previous: String?) -> String {
-        let quoted = shellQuote(helperURL.path)
-        guard let previous, !previous.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return "\(quoted) --agy-statusline --quiet"
-        }
-        if isBridgeCommand(previous, helperURL: helperURL) { return previous }
-        return "codexpeek_input=$(cat; printf x); codexpeek_input=${codexpeek_input%x}; printf '%s' \"$codexpeek_input\" | \(quoted) --agy-statusline --quiet; printf '%s' \"$codexpeek_input\" | (\n\(previous)\n)"
     }
 
     private static func isBridgeCommand(_ command: String, helperURL: URL) -> Bool {

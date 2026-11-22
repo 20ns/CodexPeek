@@ -57,7 +57,7 @@ final class AppController: NSObject, NSPopoverDelegate {
     private var claudeTokenFailed = false
 
     private var agySnapshot: AntigravityUsageSnapshot?
-    private var agyBridgeEnabled = false
+    private var agyFetchTask: Task<Void, Never>?
     private var agyUsageError: String?
     private var agyTokenReport: TokenUsageReport?
     private var agyTokenTask: Task<Void, Never>?
@@ -153,6 +153,7 @@ final class AppController: NSObject, NSPopoverDelegate {
             self.refreshClaudeUsage()
             self.refreshClaudeAccountUsage()
             self.refreshAgyUsage()
+            self.fetchAgyUsage()
             self.refreshAgyTokenReportIfNeeded(force: false)
         }
     }
@@ -224,6 +225,7 @@ final class AppController: NSObject, NSPopoverDelegate {
         refreshClaudeUsage()
         refreshClaudeAccountUsage(force: true)
         refreshAgyUsage()
+        fetchAgyUsage()
         refreshAgyTokenReportIfNeeded(force: true)
     }
 
@@ -284,6 +286,7 @@ final class AppController: NSObject, NSPopoverDelegate {
             if agyEnabled {
                 watchAgyUsage()
                 refreshAgyUsage()
+                fetchAgyUsage()
                 refreshAgyTokenReportIfNeeded(force: true)
             } else {
                 agyUsageWatcher.stop()
@@ -302,19 +305,6 @@ final class AppController: NSObject, NSPopoverDelegate {
             refreshClaudeUsage()
         } catch {
             claudeUsageError = "Could not enable local Claude usage"
-            render()
-        }
-    }
-
-    private func enableAgyStatusLine() {
-        do {
-            guard let executableURL = Bundle.main.executableURL else { return }
-            try AntigravityStatusLine.install(executableURL: executableURL)
-            agyUsageError = nil
-            watchAgyUsage()
-            refreshAgyUsage()
-        } catch {
-            agyUsageError = "Could not enable Antigravity statusline bridge"
             render()
         }
     }
@@ -567,6 +557,7 @@ final class AppController: NSObject, NSPopoverDelegate {
         }
         popoverViewModel.onRefreshAgy = { [weak self] in
             self?.refreshAgyUsage()
+            self?.fetchAgyUsage()
             self?.refreshAgyTokenReportIfNeeded(force: true)
         }
         popoverViewModel.onOpenHistory = { [weak self] in self?.openUsageHistory() }
@@ -582,7 +573,6 @@ final class AppController: NSObject, NSPopoverDelegate {
         popoverViewModel.onOpenCodex = { [weak self] in self?.openCodex() }
         popoverViewModel.onLogOutCodex = { [weak self] in self?.logOut() }
         popoverViewModel.onEnableClaudeBridge = { [weak self] in self?.enableClaudeLocalUsage() }
-        popoverViewModel.onEnableAgyBridge = { [weak self] in self?.enableAgyStatusLine() }
         popoverViewModel.onOpenAgyCLI = { [weak self] in self?.openAgyCLI() }
         popoverViewModel.onQuit = { [weak self] in self?.quit() }
         popoverViewModel.onPreferredSizeChange = { [weak self] in
@@ -633,6 +623,7 @@ final class AppController: NSObject, NSPopoverDelegate {
                 self?.refreshClaudeUsage()
                 self?.refreshClaudeAccountUsage()
                 self?.refreshAgyUsage()
+                self?.fetchAgyUsage()
                 self?.refreshAgyTokenReportIfNeeded(force: false)
             }
         }
@@ -817,11 +808,11 @@ final class AppController: NSObject, NSPopoverDelegate {
         vm.claudeBridgeEnabled = claudeBridgeEnabled
 
         vm.agySnapshot = agySnapshot
-        vm.agyBridgeEnabled = agyBridgeEnabled
         vm.agyUsageError = agyUsageError
         vm.agyTokenReport = agyTokenReport
         vm.agyModelShares = AntigravityTokenUsageSource.modelShares(from: agyTokenReport)
         vm.agyTokenRefreshing = agyTokenTask != nil
+        vm.agyUsageRefreshing = agyFetchTask != nil
         vm.agyTokenFailed = agyTokenFailed
 
         vm.ensureValidTab()
@@ -1362,7 +1353,6 @@ final class AppController: NSObject, NSPopoverDelegate {
             "Claude stale: \(claudeSnapshot?.isStale == true ? "yes" : "no")",
             "Claude updated: \(claudeSnapshot.map { UIFormatters.usageUpdatedString(from: $0.updatedAt) } ?? "never")",
             "Antigravity quota: \(agyBuckets)",
-            "Antigravity statusline bridge: \(agyBridgeEnabled ? "enabled" : "disabled")",
             "Antigravity 7-day API-equivalent estimate: \(agyWeekCost)",
             "Antigravity all-time API-equivalent estimate: \(agyAllCost)",
             "Antigravity sessions: \(agyTokenReport?.allTime.sessionCount ?? 0)"
@@ -1383,6 +1373,29 @@ final class AppController: NSObject, NSPopoverDelegate {
         }
     }
 
+    /// Asks the agy CLI for fresh quota (it only reaches the cache via the statusline while the TUI is open).
+    /// Never call this from the cache watcher: the fetch rewrites that file and would loop.
+    private func fetchAgyUsage() {
+        guard agyEnabled, agyFetchTask == nil else { return }
+        agyFetchTask = Task { [weak self] in
+            let result: Result<AntigravityUsageSnapshot, Error>
+            do { result = .success(try await AntigravityStatusLine.fetchUsage()) } catch { result = .failure(error) }
+            guard let self else { return }
+            self.agyFetchTask = nil
+            switch result {
+            case .success(let snapshot):
+                self.agySnapshot = snapshot
+                self.agyUsageError = nil
+            case .failure(let error):
+                self.agySnapshot?.isStale = true
+                // No agy CLI is a normal setup (app or ACP only), not an error worth a banner every 5 minutes.
+                self.agyUsageError = (error as? AntigravityStatusLine.FetchError) == .notFound ? nil : error.localizedDescription
+            }
+            self.render()
+        }
+        render()
+    }
+
     private func refreshAgyUsage() {
         guard agyEnabled else { return }
         do {
@@ -1391,7 +1404,6 @@ final class AppController: NSObject, NSPopoverDelegate {
                 agyUsageError = nil
             }
             agySnapshot = cached
-            agyBridgeEnabled = try AntigravityStatusLine.isInstalled()
         } catch {
             agySnapshot?.isStale = true
             agyUsageError = "Could not read local Antigravity usage"

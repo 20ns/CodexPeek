@@ -80,11 +80,11 @@ final class PopoverViewModel: ObservableObject {
 
     // Antigravity (AGY)
     @Published var agySnapshot: AntigravityUsageSnapshot?
-    @Published var agyBridgeEnabled = false
     @Published var agyUsageError: String?
     @Published var agyTokenReport: TokenUsageReport?
     @Published var agyModelShares: [AntigravityModelShare] = []
     @Published var agyTokenRefreshing = false
+    @Published var agyUsageRefreshing = false
     @Published var agyTokenFailed = false
 
     @Published var copiedDebugFeedback = false
@@ -98,7 +98,7 @@ final class PopoverViewModel: ObservableObject {
     }
 
     var isAnyRefreshing: Bool {
-        codexRefreshState == .refreshing || claudeUsageRefreshing || agyTokenRefreshing
+        codexRefreshState == .refreshing || claudeUsageRefreshing || agyTokenRefreshing || agyUsageRefreshing
     }
 
     func ensureValidTab() {
@@ -129,7 +129,6 @@ final class PopoverViewModel: ObservableObject {
     var onOpenCodex: (() -> Void)?
     var onLogOutCodex: (() -> Void)?
     var onEnableClaudeBridge: (() -> Void)?
-    var onEnableAgyBridge: (() -> Void)?
     var onOpenAgyCLI: (() -> Void)?
     var onQuit: (() -> Void)?
     var onPreferredSizeChange: (() -> Void)?
@@ -200,13 +199,18 @@ struct UsagePopoverView: View {
             Button {
                 vm.onRefreshAll?()
             } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .rotationEffect(.degrees(vm.isAnyRefreshing ? 360 : 0))
-                    .animation(vm.isAnyRefreshing ? .linear(duration: 0.8).repeatForever(autoreverses: false) : .default, value: vm.isAnyRefreshing)
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
+                // A timeline, not a repeatForever animation: that transaction also animated
+                // layout changes made mid-refresh, so the icon bobbed up and down forever.
+                TimelineView(.animation(paused: !vm.isAnyRefreshing)) { context in
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(vm.isAnyRefreshing
+                            ? context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 0.8) / 0.8 * 360
+                            : 0))
+                }
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
             }
             .buttonStyle(PopoverIconButtonStyle())
             .disabled(vm.isAnyRefreshing)
@@ -810,8 +814,8 @@ struct UsagePopoverView: View {
             Divider().opacity(0.4)
 
             if let err = vm.agyUsageError {
-                alertBanner(title: "Antigravity bridge", subtitle: err, actionTitle: "Retry") {
-                    vm.onEnableAgyBridge?()
+                alertBanner(title: "Antigravity quota", subtitle: err, actionTitle: "Retry") {
+                    vm.onRefreshAgy?()
                 }
             }
 
@@ -856,7 +860,8 @@ struct UsagePopoverView: View {
                                     .foregroundStyle(.secondary)
                                 Text("\(share.sharePercent)%")
                                     .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                                    .frame(width: 34, alignment: .trailing)
+                                    .fixedSize()
+                                    .frame(minWidth: 34, alignment: .trailing)
                             }
                             UsageProgressBar(
                                 fraction: Double(share.sharePercent) / 100.0,
@@ -884,27 +889,15 @@ struct UsagePopoverView: View {
             costBreakdownCard(report: report, isRefreshing: vm.agyTokenRefreshing, failed: vm.agyTokenFailed, sourceName: "Antigravity")
 
             HStack(spacing: 6) {
-                if !vm.agyBridgeEnabled {
-                    Button {
-                        vm.onEnableAgyBridge?()
-                    } label: {
-                        Text("Enable AGY quota bridge")
-                            .font(.system(size: 11.5, weight: .medium))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 5.5)
-                    }
-                    .buttonStyle(PopoverActionButtonStyle())
-                } else {
-                    Button {
-                        vm.onOpenAgyCLI?()
-                    } label: {
-                        Label("Open AGY", systemImage: "terminal")
-                            .font(.system(size: 11.5, weight: .medium))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 5.5)
-                    }
-                    .buttonStyle(PopoverActionButtonStyle())
+                Button {
+                    vm.onOpenAgyCLI?()
+                } label: {
+                    Label("Open AGY", systemImage: "terminal")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 5.5)
                 }
+                .buttonStyle(PopoverActionButtonStyle())
 
                 Button {
                     vm.onRefreshAgy?()
@@ -1275,7 +1268,7 @@ struct UsagePopoverView: View {
         if let tier = vm.agySnapshot?.planTier, !tier.isEmpty {
             parts.append(tier)
         }
-        parts.append(vm.agyBridgeEnabled ? "Statusline bridge · App & ACP logs" : "App, CLI & ACP logs")
+        parts.append("AGY CLI quota · local logs")
         return parts.joined(separator: " · ")
     }
 

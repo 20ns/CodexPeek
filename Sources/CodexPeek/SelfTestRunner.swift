@@ -1890,6 +1890,24 @@ struct SelfTestRunner {
         try expect(captured.primaryBucket?.id == "gemini-5h" && captured.primaryBucket?.window.usedPercent == 28, "AGY 5h quota mismatch")
         try expect(captured.secondaryBucket?.id == "gemini-weekly" && captured.secondaryBucket?.window.usedPercent == 6, "AGY weekly quota mismatch")
 
+        // `agy -p /usage` JSON reshaped into the same capture path; plan tier survives from the earlier cache
+        let usageJSON = Data(#"""
+        {"status":"SUCCESS","command":{"name":"usage","data":{"groups":[
+          {"name":"Gemini Models","buckets":[
+            {"id":"gemini-weekly","remaining_fraction":0.72,"reset_time":"2027-01-22T07:50:32Z"},
+            {"id":"gemini-5h","remaining_fraction":0.638,"reset_time":"2027-01-21T20:28:30Z"}]},
+          {"name":"Claude and GPT models","buckets":[
+            {"id":"3p-weekly","remaining_fraction":1,"reset_time":"2027-01-22T07:50:32Z"},
+            {"id":"3p-5h","remaining_fraction":1,"reset_time":"2027-01-21T20:28:30Z"}]},
+          {"name":"Gemini 4 Argon","buckets":[
+            {"id":"gemini-argon-wtu-weekly","remaining_fraction":1,"reset_time":"2027-01-22T07:50:32Z"}]}]}}}
+        """#.utf8)
+        let fetched = try unwrap(try AntigravityStatusLine.capture(AntigravityStatusLine.quotaPayload(fromUsage: usageJSON), at: cacheFile, now: now), "AGY /usage should capture quota")
+        try expect(fetched.buckets.map(\.id) == ["gemini-5h", "gemini-weekly", "gemini-argon-wtu-weekly", "3p-5h", "3p-weekly"], "AGY /usage bucket order mismatch")
+        try expect(fetched.primaryBucket?.window.usedPercent == 36 && fetched.secondaryBucket?.id == "gemini-weekly", "AGY /usage used percent mismatch")
+        try expect(fetched.buckets.map(\.title).suffix(3) == ["Gemini Argon weekly", "Claude / GPT 5-hour", "Claude / GPT weekly"], "AGY /usage titles mismatch")
+        try expect(fetched.planTier == "Pro", "AGY /usage should keep the cached plan tier")
+
         // Antigravity transcript scanning: separate uncached input + cache_read_tokens + deduplication across roots + model shares
         let rootA = tempRoot.appendingPathComponent("brainA", isDirectory: true)
         let rootB = tempRoot.appendingPathComponent("brainB", isDirectory: true)
