@@ -77,6 +77,7 @@ final class PopoverViewModel: ObservableObject {
     @Published var claudeUsageRefreshing = false
     @Published var claudeUsageError: String?
     @Published var claudeBridgeEnabled = false
+    @Published var claudePlan: String?
 
     // Antigravity (AGY)
     @Published var agySnapshot: AntigravityUsageSnapshot?
@@ -708,7 +709,7 @@ struct UsagePopoverView: View {
                     Text("Claude Code")
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(.primary)
-                    Text(vm.claudeBridgeEnabled ? "OAuth · local bridge active" : "OAuth usage")
+                    Text(([vm.claudePlan].compactMap { $0 } + [vm.claudeBridgeEnabled ? "OAuth · local bridge active" : "OAuth usage"]).joined(separator: " · "))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -1243,7 +1244,7 @@ struct UsagePopoverView: View {
         if vm.claudeSnapshot?.isStale == true {
             return StatusBadge(text: "Stale", kind: .warning)
         }
-        return nil
+        return vm.claudePlan.map { StatusBadge(text: $0, kind: .subtle) }
     }
 
     private var codexLiveText: String {

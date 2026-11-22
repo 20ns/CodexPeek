@@ -272,6 +272,9 @@ struct SelfTestRunner {
     }
 
     private func testClaudeCodeUsage() throws {
+        try expect(ClaudeCodePlan.name(organizationType: "claude_max", rateLimitTier: "default_claude_max_5x") == "Max 5x", "Claude Max 5x plan name")
+        try expect(ClaudeCodePlan.name(organizationType: "claude_pro", rateLimitTier: "default_claude_pro") == "Pro", "Claude Pro plan name")
+        try expect(ClaudeCodePlan.name(organizationType: nil, rateLimitTier: nil) == nil, "Missing Claude plan should be nil")
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1925,7 +1928,13 @@ struct SelfTestRunner {
         try Data(transcript.utf8).write(to: logsA.appendingPathComponent("transcript.jsonl"))
         try Data(transcript.utf8).write(to: logsB.appendingPathComponent("transcript.jsonl"))
 
-        let report = try AntigravityTokenUsageSource(brainRoots: [rootA, rootB], pricingCatalog: .builtIn).usageReport()
+        let source = AntigravityTokenUsageSource(brainRoots: [rootA, rootB], pricingCatalog: .builtIn)
+        let report = try source.usageReport()
+        let unchanged = try source.usageReport()
+        try expect(unchanged == report, "An unchanged scan should reuse the last report")
+        try Data((transcript + "\n").utf8).write(to: logsA.appendingPathComponent("transcript.jsonl"))
+        let rescanned = try source.usageReport()
+        try expect(rescanned.generatedAt != report.generatedAt, "A changed log should rescan")
         try expect(report.week.inputTokens == 350_000, "AGY total input should sum uncached + cache_read and dedupe mirrored roots")
         try expect(report.week.cachedInputTokens == 200_000, "AGY cached input mismatch")
         try expect(report.week.outputTokens == 20_000, "AGY output tokens mismatch")
@@ -1936,6 +1945,20 @@ struct SelfTestRunner {
         try expect(report.week.estimatedCostUSD == Decimal(string: "0.63"), "AGY exact cost mismatch")
         let shares = AntigravityTokenUsageSource.modelShares(from: report, catalog: .builtIn)
         try expect(shares.count == 2 && shares[0].modelName == "Gemini 4 Neon" && shares[0].sharePercent == 76, "AGY model share percentage mismatch")
+
+        // `agy /usage` is skipped until a transcript changes, a bucket resets or the last fetch ages out
+        let transcriptFile = logsA.appendingPathComponent("transcript.jsonl")
+        let lastFetch = now.addingTimeInterval(-600)
+        func needsFetch(lastFetch: Date = lastFetch, at: Date = now) -> Bool {
+            AntigravityStatusLine.needsFetch(lastFetch: lastFetch, roots: [rootA], cacheURL: cacheFile, now: at)
+        }
+        try FileManager.default.setAttributes([.modificationDate: lastFetch.addingTimeInterval(-60)], ofItemAtPath: transcriptFile.path)
+        try expect(!needsFetch(), "Quiet transcripts and live buckets should skip the agy fetch")
+        try expect(needsFetch(at: now.addingTimeInterval(3600)), "An hour-old fetch should run again")
+        let firstReset = try unwrap(fetched.buckets.compactMap(\.window.resetsAt).min(), "AGY buckets should carry reset times")
+        try expect(needsFetch(lastFetch: firstReset, at: firstReset.addingTimeInterval(1)), "A passed reset should fetch")
+        try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: transcriptFile.path)
+        try expect(needsFetch(), "A transcript newer than the last fetch should fetch")
     }
 }
 

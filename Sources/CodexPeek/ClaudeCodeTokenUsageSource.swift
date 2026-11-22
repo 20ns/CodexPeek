@@ -6,6 +6,7 @@ final class ClaudeCodeTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     private let pinnedCatalog: TokenPricingCatalog?
     private var pricingCatalog: TokenPricingCatalog { pinnedCatalog ?? .standard }
     private let indexStore: TokenUsageSessionIndexStoring?
+    private let memo = UnchangedScanMemo()
 
     init(
         projectsRootURL: URL = ClaudeCodeTokenUsageSource.defaultProjectsRoot(),
@@ -38,6 +39,7 @@ final class ClaudeCodeTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         let weekCutoff = now.addingTimeInterval(-7 * 24 * 60 * 60)
         let monthCutoff = now.addingTimeInterval(-30 * 24 * 60 * 60)
         let files = try logFiles()
+        if let reused = memo.report(for: files, now: now) { return reused }
         var index = (try? indexStore?.load()) ?? TokenUsageSessionIndex()
         let parserChanged = index.claudeParserVersion != 3
         if parserChanged {
@@ -125,7 +127,9 @@ final class ClaudeCodeTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         if indexChanged {
             try? indexStore?.save(index)
         }
-        return ClaudeLegacyUsage.backfill(report, from: projectsRootURL.deletingLastPathComponent().appendingPathComponent("stats-cache.json"))
+        report = ClaudeLegacyUsage.backfill(report, from: projectsRootURL.deletingLastPathComponent().appendingPathComponent("stats-cache.json"))
+        memo.remember(report, for: files)
+        return report
     }
 
     private func logFiles() throws -> [SessionLogFile] {

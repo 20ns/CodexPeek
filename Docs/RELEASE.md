@@ -1,5 +1,10 @@
 # Release Notes
 
+## 1.0.17
+
+- Show your Claude plan (for example Pro or Max 5x) as Claude Code's badge, read from Claude Code's saved profile.
+- Use less battery between refreshes: reuse token totals when no log changed, skip rewriting identical reports, run `agy /usage` only after Antigravity activity, a quota reset or an hour, and stop laying out the menu while it is closed. Manual refresh still fetches everything.
+
 ## 1.0.16
 
 - Show weekly usage in the top tabs instead of the 5-hour window.

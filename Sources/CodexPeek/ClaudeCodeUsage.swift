@@ -10,6 +10,32 @@ struct ClaudeCodeUsageSnapshot: Codable, Equatable, Sendable {
     var isStale: Bool
 }
 
+/// The plan name Claude Code caches in `.claude.json` (`oauthAccount`), e.g. "Pro" or "Max 5x". Profile data only, no tokens.
+enum ClaudeCodePlan {
+    static func load(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> String? {
+        let url = environment["CLAUDE_CONFIG_DIR"].flatMap { $0.isEmpty ? nil : $0 }
+            .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath).appendingPathComponent(".claude.json") }
+            ?? homeDirectory.appendingPathComponent(".claude.json")
+        guard let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let account = root["oauthAccount"] as? [String: Any] else { return nil }
+        return name(organizationType: account["organizationType"] as? String,
+                    rateLimitTier: account["organizationRateLimitTier"] as? String)
+    }
+
+    static func name(organizationType: String?, rateLimitTier: String?) -> String? {
+        guard let type = organizationType?.lowercased(), type.hasPrefix("claude_") else { return nil }
+        let plan = type.dropFirst("claude_".count).capitalized
+        // Tier looks like "default_claude_max_5x"; keep the multiplier when there is one.
+        guard let multiplier = rateLimitTier?.split(separator: "_").last, multiplier.hasSuffix("x"),
+              Int(multiplier.dropLast()) != nil else { return plan }
+        return "\(plan) \(multiplier)"
+    }
+}
+
 enum ClaudeCodeStatusLine {
     private static let staleAfter: TimeInterval = 5 * 60
     /// 9999-12-31T23:59:59Z so `Int(reset.timeIntervalSince(now))` cannot trap.

@@ -58,6 +58,8 @@ final class AppController: NSObject, NSPopoverDelegate {
 
     private var agySnapshot: AntigravityUsageSnapshot?
     private var agyFetchTask: Task<Void, Never>?
+    private var lastAgyFetch = Date.distantPast
+    private var claudePlan: String?
     private var agyUsageError: String?
     private var agyTokenReport: TokenUsageReport?
     private var agyTokenTask: Task<Void, Never>?
@@ -168,6 +170,7 @@ final class AppController: NSObject, NSPopoverDelegate {
         refreshClaudeUsage()
         refreshAgyUsage()
         render()
+        syncPopover()
     }
 
     func popoverDidClose(_ notification: Notification) {
@@ -225,7 +228,7 @@ final class AppController: NSObject, NSPopoverDelegate {
         refreshClaudeUsage()
         refreshClaudeAccountUsage(force: true)
         refreshAgyUsage()
-        fetchAgyUsage()
+        fetchAgyUsage(force: true)
         refreshAgyTokenReportIfNeeded(force: true)
     }
 
@@ -286,7 +289,7 @@ final class AppController: NSObject, NSPopoverDelegate {
             if agyEnabled {
                 watchAgyUsage()
                 refreshAgyUsage()
-                fetchAgyUsage()
+                fetchAgyUsage(force: true)
                 refreshAgyTokenReportIfNeeded(force: true)
             } else {
                 agyUsageWatcher.stop()
@@ -557,7 +560,7 @@ final class AppController: NSObject, NSPopoverDelegate {
         }
         popoverViewModel.onRefreshAgy = { [weak self] in
             self?.refreshAgyUsage()
-            self?.fetchAgyUsage()
+            self?.fetchAgyUsage(force: true)
             self?.refreshAgyTokenReportIfNeeded(force: true)
         }
         popoverViewModel.onOpenHistory = { [weak self] in self?.openUsageHistory() }
@@ -776,6 +779,20 @@ final class AppController: NSObject, NSPopoverDelegate {
         }
         statusItem.button?.toolTip = nil
 
+        // A closed popover keeps its window, and every view-model change re-lays it out; it syncs on open.
+        if popover.isShown { syncPopover() }
+
+        usageHistoryWindowController?.update(
+            report: tokenReport,
+            claudeReport: claudeTokenReport,
+            antigravityReport: agyTokenReport,
+            planHistory: planHistory,
+            snapshot: snapshot,
+            accountPlan: activeAccountSnapshot?.planType ?? .unknown
+        )
+    }
+
+    private func syncPopover() {
         let vm = popoverViewModel
         vm.primaryProvider = primaryProvider
         vm.codexEnabled = codexEnabled
@@ -806,6 +823,7 @@ final class AppController: NSObject, NSPopoverDelegate {
         vm.claudeUsageRefreshing = claudeUsageTask != nil
         vm.claudeUsageError = claudeUsageError
         vm.claudeBridgeEnabled = claudeBridgeEnabled
+        vm.claudePlan = claudePlan
 
         vm.agySnapshot = agySnapshot
         vm.agyUsageError = agyUsageError
@@ -819,15 +837,6 @@ final class AppController: NSObject, NSPopoverDelegate {
         if popover.isShown {
             DispatchQueue.main.async { [weak self] in self?.updatePopoverSize() }
         }
-
-        usageHistoryWindowController?.update(
-            report: tokenReport,
-            claudeReport: claudeTokenReport,
-            antigravityReport: agyTokenReport,
-            planHistory: planHistory,
-            snapshot: snapshot,
-            accountPlan: activeAccountSnapshot?.planType ?? .unknown
-        )
     }
 
     /// Single privacy-aware label used across the Codex header, account picker, removal dialog, and debug info.
@@ -1375,8 +1384,13 @@ final class AppController: NSObject, NSPopoverDelegate {
 
     /// Asks the agy CLI for fresh quota (it only reaches the cache via the statusline while the TUI is open).
     /// Never call this from the cache watcher: the fetch rewrites that file and would loop.
-    private func fetchAgyUsage() {
+    private func fetchAgyUsage(force: Bool = false) {
         guard agyEnabled, agyFetchTask == nil else { return }
+        if !force, agyUsageError == nil, !AntigravityStatusLine.needsFetch(lastFetch: lastAgyFetch) { // a failed fetch retries
+            AntigravityStatusLine.renew()
+            return
+        }
+        let started = Date()
         agyFetchTask = Task { [weak self] in
             let result: Result<AntigravityUsageSnapshot, Error>
             do { result = .success(try await AntigravityStatusLine.fetchUsage()) } catch { result = .failure(error) }
@@ -1384,6 +1398,7 @@ final class AppController: NSObject, NSPopoverDelegate {
             self.agyFetchTask = nil
             switch result {
             case .success(let snapshot):
+                self.lastAgyFetch = started
                 self.agySnapshot = snapshot
                 self.agyUsageError = nil
             case .failure(let error):
@@ -1437,6 +1452,7 @@ final class AppController: NSObject, NSPopoverDelegate {
             $0.isStale || Date().timeIntervalSince($0.updatedAt) >= Self.refreshInterval - Self.refreshTolerance
         } ?? true
         guard claudeEnabled, claudeUsageTask == nil, force || due else { return }
+        claudePlan = ClaudeCodePlan.load() // same cadence as the quota fetch; the plan rarely changes
         refreshTimer?.fireDate = Date().addingTimeInterval(Self.refreshInterval)
         claudeUsageTask = Task { [weak self] in
             guard let self else { return }

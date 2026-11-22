@@ -28,6 +28,7 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     private let pinnedCatalog: TokenPricingCatalog?
     private var pricingCatalog: TokenPricingCatalog { pinnedCatalog ?? .standard }
     private let indexStore: TokenUsageSessionIndexStoring?
+    private let memo = UnchangedScanMemo()
 
     init(
         sessionsRootURL: URL = URL(fileURLWithPath: NSString(string: "~/.codex/sessions").expandingTildeInPath),
@@ -46,6 +47,7 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         let weekCutoff = now.addingTimeInterval(-7 * 24 * 60 * 60)
         let last30DaysCutoff = now.addingTimeInterval(-30 * 24 * 60 * 60)
         let files = try sessionLogFiles()
+        if let reused = memo.report(for: files, now: now) { return reused }
         var index = (try? indexStore?.load()) ?? TokenUsageSessionIndex()
         let currentPaths = Set(files.map(\.path))
         var indexChanged = Set(index.sessions.keys) != currentPaths
@@ -88,6 +90,7 @@ final class CodexTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         if indexChanged {
             try? indexStore?.save(index)
         }
+        memo.remember(report, for: files)
         return report
     }
 
@@ -287,6 +290,8 @@ final class TokenUsageReportCacheStore: TokenUsageReportStoring, @unchecked Send
     private let fileManager: FileManager
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private let lock = NSLock()
+    private var lastSaved: TokenUsageReport?
 
     init(
         cacheURL: URL = TokenUsageReportCacheStore.defaultCacheURL(),
@@ -306,6 +311,7 @@ final class TokenUsageReportCacheStore: TokenUsageReportStoring, @unchecked Send
     }
 
     func save(_ report: TokenUsageReport) throws {
+        guard lock.withLock({ lastSaved != report }) else { return } // a reused report is already on disk
         try fileManager.createDirectory(
             at: cacheURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -313,6 +319,7 @@ final class TokenUsageReportCacheStore: TokenUsageReportStoring, @unchecked Send
 
         let data = try encoder.encode(report)
         try data.write(to: cacheURL, options: .atomic)
+        lock.withLock { lastSaved = report }
     }
 
     static func defaultCacheURL(profileID: String = "default") -> URL {
@@ -707,11 +714,30 @@ enum LogLines {
     }
 }
 
-struct SessionLogFile {
+struct SessionLogFile: Equatable {
     let url: URL
     let path: String
     let size: Int
     let modifiedAt: Date
+}
+
+/// A scan with no changed log gives the same totals, so reuse the last report instead of re-aggregating
+/// every request. Its week and month windows slide, hence the reuse lapses after 30 minutes.
+final class UnchangedScanMemo: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last: (files: [SessionLogFile], report: TokenUsageReport)?
+
+    func report(for files: [SessionLogFile], now: Date) -> TokenUsageReport? {
+        lock.withLock {
+            guard let last, last.files == files,
+                  now.timeIntervalSince(last.report.generatedAt ?? .distantPast) < 30 * 60 else { return nil }
+            return last.report
+        }
+    }
+
+    func remember(_ report: TokenUsageReport, for files: [SessionLogFile]) {
+        lock.withLock { last = (files, report) }
+    }
 }
 
 struct TokenUsageSessionIndex: Codable {

@@ -169,6 +169,28 @@ enum AntigravityStatusLine {
         return try JSONSerialization.data(withJSONObject: ["quota": quota])
     }
 
+    /// `/usage` is a 3-10 s run of a 230 MB binary and quota only moves when agy runs, so skip it until a
+    /// brain transcript changes or a cached bucket resets. `maxAge` bounds use from another device, which leaves no local trace.
+    static func needsFetch(
+        lastFetch: Date,
+        roots: [URL] = AntigravityConfig.defaultBrainRoots(),
+        cacheURL: URL = cacheURL,
+        now: Date = Date(),
+        maxAge: TimeInterval = 60 * 60
+    ) -> Bool {
+        guard let cache = readCache(cacheURL) else { return true }
+        return cache.buckets.contains { ($0.window.resetsAt ?? .distantFuture) <= now }
+            || now.timeIntervalSince(lastFetch) >= maxAge
+            || AntigravityTokenUsageSource.transcriptFiles(in: roots).contains { $0.modifiedAt > lastFetch }
+    }
+
+    /// Restamps a reading nothing could have changed, so a skipped fetch doesn't leave it showing as stale.
+    static func renew(at url: URL = cacheURL, now: Date = Date()) {
+        guard var cache = readCache(url) else { return }
+        cache.updatedAt = now
+        try? writeCache(cache, to: url)
+    }
+
     /// Runs the local `/usage` slash command (0 tokens, ~10 s) and stores the result like a statusline capture.
     /// The ACP server exposes no quota, so this is what keeps AGY fresh when only T3 Code is running.
     static func fetchUsage(
@@ -399,6 +421,7 @@ final class AntigravityTokenUsageSource: TokenUsageSource, @unchecked Sendable {
     private let pinnedCatalog: TokenPricingCatalog?
     private var pricingCatalog: TokenPricingCatalog { pinnedCatalog ?? .standard }
     private let indexStore: TokenUsageSessionIndexStoring?
+    private let memo = UnchangedScanMemo()
 
     init(
         brainRoots: [URL]? = nil,
@@ -421,7 +444,8 @@ final class AntigravityTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         let now = Date()
         let weekCutoff = now.addingTimeInterval(-7 * 24 * 60 * 60)
         let monthCutoff = now.addingTimeInterval(-30 * 24 * 60 * 60)
-        let files = try transcriptFiles()
+        let files = Self.transcriptFiles(in: brainRootsProvider(), fileManager: fileManager)
+        if let reused = memo.report(for: files, now: now) { return reused }
         var index = (try? indexStore?.load()) ?? TokenUsageSessionIndex()
         let parserChanged = index.agyParserVersion != Self.parserVersion
         if parserChanged {
@@ -501,6 +525,7 @@ final class AntigravityTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         if indexChanged {
             try? indexStore?.save(index)
         }
+        memo.remember(report, for: files)
         return report
     }
 
@@ -550,9 +575,9 @@ final class AntigravityTokenUsageSource: TokenUsageSource, @unchecked Sendable {
         }
     }
 
-    private func transcriptFiles() throws -> [SessionLogFile] {
+    static func transcriptFiles(in roots: [URL], fileManager: FileManager = .default) -> [SessionLogFile] {
         var files: [SessionLogFile] = []
-        for root in brainRootsProvider() {
+        for root in roots {
             guard fileManager.fileExists(atPath: root.path),
                   let conversations = try? fileManager.contentsOfDirectory(
                       at: root,
