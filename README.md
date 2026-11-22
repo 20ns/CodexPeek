@@ -4,7 +4,7 @@
 
 <h1 align="center">CodexPeek</h1>
 
-<p align="center">Codex and Claude Code usage in your macOS menu bar.</p>
+<p align="center">Codex, Claude Code and Antigravity usage in your macOS menu bar.</p>
 
 <p align="center">
   macOS 14+ · Swift 6<br>
@@ -19,22 +19,23 @@
 
 CodexPeek shows your 5-hour and weekly limits, how much you've used, and when they reset. Open Usage History for token counts and API-equivalent cost estimates by model.
 
-The menu is native AppKit. The history window uses Swift Charts. There are no package dependencies, and the Codex helper runs only when the app needs it.
+The menu is SwiftUI in a native menu-bar popover. The history window uses Swift Charts. There are no package dependencies, and the Codex helper runs only when the app needs it.
 
 <p align="center">
-  <img src="Docs/Images/main.png" alt="CodexPeek menu showing 5-hour and weekly Codex usage with reset times" width="480">
-  <br>
-  <sub>An earlier Codex-only build. Current builds also include Claude Code and Usage History.</sub>
+  <img src="Docs/Images/main.png" alt="CodexPeek All view showing 5-hour and weekly usage for Codex, Claude Code and Antigravity, with plan badges and API-equivalent cost estimates" width="346">
+  <img src="Docs/Images/codex.png" alt="CodexPeek Codex tab showing the account, 5-hour and weekly windows with reset times and pace, and 7-day, 30-day and all-time estimates" width="346">
 </p>
 
 ## What you can see
 
 - Codex 5-hour and weekly usage, reset countdowns, and Spark limits when available.
-- Claude Code 5-hour and weekly usage in a separate section.
-- A primary service of your choice (Codex or Claude Code) in the menu-bar icon, with the other one optional.
+- Claude Code 5-hour and weekly usage, your plan, and per-model weekly limits such as Fable's.
+- Antigravity 5-hour and weekly quota for Gemini and Claude / GPT models, the separate Gemini Argon limit, and your Google AI plan.
+- Weekly usage for each service in the tabs at the top, and an All view with every service together.
+- A primary service of your choice in the menu-bar icon, with the others optional.
 - A pace mark on weekly bars: usage short of the mark means you can burn faster before the reset.
 - Daily and hourly token history by model, including retained archived Codex sessions and Claude subagent logs.
-- Codex, Claude Code, or combined history, with API-equivalent estimates for the last 7 days, 30 days, and all retained logs.
+- Codex, Claude Code, Antigravity, or combined history, with API-equivalent estimates for the last 7 days, 30 days, and all retained logs.
 - The active Codex account and plan, with account switching from the menu.
 
 Usage refreshes every five minutes. Use the refresh button at the top right of the menu to pull everything immediately. Launch at Login is available in the app menu.
@@ -45,7 +46,7 @@ Dollar amounts estimate what the recorded tokens would cost at API rates. They a
 
 Build from source for now. There are no published downloads on the [releases page](https://github.com/20ns/CodexPeek/releases) yet.
 
-You'll need macOS 14 or later, a Swift 6 toolchain, and the Codex CLI installed and signed in. Claude Code usage needs a signed-in Claude Code account.
+You'll need macOS 14 or later and a Swift 6 toolchain. Each service needs its own sign-in: the Codex CLI for Codex, a Claude Code account for Claude, and the Antigravity CLI (`agy`) for Antigravity quota.
 
 ```sh
 git clone https://github.com/20ns/CodexPeek.git
@@ -70,7 +71,9 @@ Codex limits come from the local `codex app-server` protocol. The app starts a p
 
 Claude limits come from Anthropic's usage endpoint using your existing Claude Code credentials. An optional status-line bridge can update readings between refreshes. The endpoint is not a documented public API, so changes to it may require an app update.
 
-Token history and cost estimates come from local session logs. CodexPeek parses them on your Mac and caches unchanged files between scans.
+Antigravity limits come from the `agy` CLI's local `/usage` command, which uses no tokens. CodexPeek runs it only after local Antigravity activity, a quota reset, or an hour has passed, so it stays current when you use Antigravity through the app or ACP.
+
+Token history and cost estimates come from local session logs, including Antigravity app, CLI and ACP transcripts. CodexPeek parses them on your Mac and caches unchanged files between scans.
 
 See [data and estimates](Docs/USAGE.md) for account behavior, credential handling, refresh timing, pricing caveats, and the Claude status-line setup.
 
